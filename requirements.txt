@@ -1,0 +1,29 @@
+# Core
+langchain>=0.3.0
+langgraph>=0.2.0
+langchain-openai>=0.2.0
+langchain-chroma>=0.1.0
+langchain-community>=0.3.0
+langchain-mcp-adapters>=0.1.0
+langgraph-checkpoint-sqlite>=2.0.0
+
+# LLM & Embeddings
+openai>=1.0.0
+
+# RAG
+chromadb>=0.5.0
+rank-bm25>=0.2.2
+
+# MCP
+mcp>=1.0.0
+
+# Web Layer
+fastapi>=0.110.0
+uvicorn>=0.27.0
+streamlit>=1.30.0
+requests>=2.31.0
+
+# Utils
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+aiosqlite>=0.19.0
