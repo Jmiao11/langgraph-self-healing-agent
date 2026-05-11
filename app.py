@@ -1,7 +1,11 @@
 # app
+import sys
+
 import streamlit as st
 import requests
 import uuid
+
+from streamlit.web import cli as stcli
 
 # 页面基础设置
 st.set_page_config(page_title="梦想自习室 AI 馆员", page_icon="📚")
@@ -85,3 +89,6 @@ else:
                         st.error("后端连接失败")
                 except Exception:
                     st.error("网络异常，请确保 API 已启动")
+
+
+# 在终端手动输入 streamlit run app.py

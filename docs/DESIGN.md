@@ -1,3 +1,5 @@
+## 架构设计
+
 ### 1.1 核心目标
 
 本项目针对 LLM Agent 在真实业务环境下的若干工程不确定性——工具调用失败、工具幻觉、权限越界、提示词注入等——构建一套具备自愈能力、多智能体路由与多层安全判定的 LangGraph 系统，旨在验证『Production-grade LLM Agent 应当具备哪些工程化设计』这一命题。
@@ -103,6 +105,8 @@
 >
 > 
 
+## 项目分层
+
 我的项目分四层：
 
 1. **用户接入层**（api.py, app.py）：接 HTTP 请求和 UI，做认证，不写业务逻辑。
@@ -124,232 +128,56 @@
 
 
 
+## 细节详解
 
+### "check_tool_error 
 
-## ✅什么叫"工具幻觉"？
+是 LangGraph 里的一个**条件边路由函数**——也就是嗅探器。它在每次 ToolNode 执行后立刻被调用。
 
-非常好的问题。你能问出这个，说明你**没有在背稿**，是真的在思考。
+它的工作机制依赖一个**字符串约定**：我在 `book_seat_tool` 这个工具函数里规定，**工具失败时返回的字符串必须以 `[TOOL_ERROR]` 开头**——这个前缀是工具层捕获 BookingService 抛出的异常后人为加上的。
 
-而且这个问题命中了你项目里**第二个最有面试杀伤力的设计**（仅次于身份隔离）。
+嗅探器的逻辑很简单：检查最新 ToolMessage 的内容是否含 `[TOOL_ERROR]`。含就路由到 error_analyzer 触发自愈，不含就回到 booking_agent 继续主流程。
 
-让我们一步步把它拆清楚。
+这个设计的关键在于——**'失败必须触发自愈'这件事由代码确定性保证，不依赖 LLM 自觉**。"
 
-------
 
-## 先回到原点：什么叫"工具幻觉"？
 
-**工具幻觉** = LLM 在做工具调用时，凭空捏造一些不存在的东西。具体有三种形式：
+### "Classify-then-Decide
 
-| 类型           | 表现                                                      | 你项目里有没有遇到过？                 |
-| -------------- | --------------------------------------------------------- | -------------------------------------- |
-| **工具名幻觉** | LLM 调用一个根本不存在的工具，比如 `query_violation_list` | ✅ Step 2.5 之前真的遇到过              |
-| **参数名幻觉** | 工具是真的，但 LLM 编了个不存在的参数名                   | 没遇到过（被 LangChain Pydantic 拦了） |
-| **参数值幻觉** | 参数名对，但值是编的，比如 student_id 编一个别人的        | ✅ Step 1 之前的越权风险本质就是这个    |
+是我做了一次架构重构后的成果。
 
-你的项目对这三种**各有不同的防御机制**。这正是这个项目的工程深度所在。我们一个个看。
+V1 设计是让 LLM **同时输出**：错误推理 + 处理动作类型 + 建议下一步调哪个工具。实测两个问题：① LLM 的 reasoning 和 action 经常自相矛盾，比如它分析说'这是业务规则限制无法重试'，但 action_type 还是选了 retry；② 'suggested_tool' 字段是自由文本，LLM 真的会编一个不存在的工具名出来。
 
-------
+V2 我做了关注点分离——
 
-## 防御 1：防"工具名幻觉" - 用 Literal 类型枚举锁死
+- **阶段 1**：LLM 只输出**错误的语义分类**。用 Pydantic Literal 把输出空间锁死成 5 个有限值（business_rule_violation、resource_conflict、invalid_params、transient_failure、unrecoverable）。LLM 不能编新的分类。
+- **阶段 2**：代码层根据分类查策略表（REPAIR_STRATEGY_MAP）。should_retry 是 True 还是 False、instruction 模板长什么样，**全部由代码确定性决定**，没有自由发挥空间。
 
-**回顾真实案例**：
+本质洞察是——**LLM 擅长理解语义，不擅长做确定性决策**。把它最容易出错的'决策环节'剥离给代码，留下它真正擅长的'语义理解'。"
 
-Step 2.5 之前，你的`error_analyzer_node`是这样定义LLM输出结构的：
 
-```python
-class RepairDecision(BaseModel):
-    action_type: Literal["retry_with_new_params", "switch_tool", "ask_user", "abort"]
-    suggested_tool: str = Field(default="", ...)  # ⚠️ 自由字符串
-    instruction_to_agent: str = ...
-```
 
-注意 `suggested_tool` 是 `str`——**LLM 想填啥填啥**。
 
-实测时它真的就编了一个 `violation_service::query_violation_list`，这个工具在你整个项目里**根本不存在**。
 
-### 你怎么修的
+### "熔断器
 
-Step 2.5 重构时，你**整个废掉了"让LLM建议工具"这个设计**，因为：
+是 AgentState 里的 `repair_attempts` 字段。
 
-1. LLM 一旦能填自由文本，就会幻觉工具名
-2. 即使用 `Literal` 把工具名枚举锁死，LLM 也只是"分类"了一下，不是真的"决策"
-3. 真正的决策应该由**代码层查策略表**完成，根本不需要 LLM 推荐工具
+计数规则：**只在 error_analyzer_node 真正被调用时，由 analyzer 自身在返回值里 +1**。也就是说，统计的是'自愈尝试次数'，不是'工具失败次数'——一个工具失败不一定进入 analyzer（嗅探器要先识别 [TOOL_ERROR] 前缀），所以这两个数不一样。
 
-所以新设计 `ErrorClassification` 里**完全没有"建议工具"字段**：
+阈值我设为 2。analyzer 进入时第一件事就是检查计数器：超过阈值直接走熔断分支，注入一个'禁止再调任何工具，必须向用户坦诚说明'的 SystemMessage，强制 Agent 终止重试链路。
 
-```python
-class ErrorClassification(BaseModel):
-    reasoning: str
-    category: Literal[
-        "business_rule_violation",
-        "resource_conflict",
-        "invalid_params",
-        "transient_failure",
-        "unrecoverable"
-    ]   # ⭐ 只能在这5个里选，物理上不可能幻觉
-    user_facing_summary: str
-```
+还有一个关键细节——**每轮新对话开始时，计数器在 API 层被重置为 0**。否则跨多轮对话会一直累加，几轮之后就误熔断了。这是状态生命周期管理的体现。
 
-LLM 的输出空间被 **Pydantic + Literal** 锁死成 5 个选项。"工具名幻觉" 这个问题被**架构性消除**了——不是"防御"，是直接**让它不可能发生**。
+这一整套机制防的是**级联故障**——比如底层数据库挂了，每次调工具都失败，没有熔断的话 Agent 会在 Tool → Analyzer → Tool → Analyzer 的循环里把 context 撑爆。"
 
-### 面试时这样讲（30秒）
 
-> "工具名幻觉这个问题，我项目里其实做了一次架构重构。最早我让 LLM 自由建议下一步该调哪个工具，实测发现它会编一个不存在的工具名出来。后来我意识到根因不是『LLM 不靠谱』，而是『不该让 LLM 做决策』——LLM 应该只负责语义理解。所以我把架构重构成 **Classify-then-Decide 双阶段**：LLM 只做错误分类，输出空间用 Pydantic 的 Literal 枚举锁死成 5 个有限选项；处理策略由代码层查策略表确定性决定。这样工具名幻觉在架构上就不可能发生了。"
 
-------
 
-## 防御 2：防"参数名幻觉" - LangChain @tool 装饰器的天然保护
 
-这个不是你主动做的，是**框架免费送的**。但面试时也要会讲。
 
-```python
-@tool
-async def book_seat_tool(seat_id: int, duration: int) -> str:
-    """执行座位预定..."""
-```
 
-`@tool` 装饰器会自动生成 JSON Schema 给 LLM：
 
-```json
-{
-  "name": "book_seat_tool",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "seat_id": {"type": "integer"},
-      "duration": {"type": "integer"}
-    },
-    "required": ["seat_id", "duration"]
-  }
-}
-```
 
-LLM 看到这个 schema，输出 JSON 时被强制约束在 `seat_id` 和 `duration` 这两个键上。如果 LLM 真的编一个 `seat_number` 参数，**LangChain 在解析阶段就会报 `ValidationError`**，根本不会调用到底层。
 
-### 面试时简短带过即可
 
-> "参数名幻觉这一层，LangChain 的 @tool 装饰器会从函数签名自动生成 JSON Schema，LLM 输出的 tool_calls 会被 Pydantic 强校验。参数名编错了在解析阶段就会被拦下，根本到不了 service 层。"
-
-------
-
-## 防御 3：防"参数值幻觉" - 工具签名层物理隔离（你的 Step 1）
-
-**这是面试官最可能深挖的一个，你必须讲透。**
-
-参数名是对的，但参数**值**可能被 LLM 编。最危险的就是 `student_id`：
-
-```python
-# ❌ 改造前
-@tool
-async def book_seat_tool(student_id: str, seat_id: int, duration: int):
-    """执行座位预定，必须明确传入学号..."""
-```
-
-LLM 看到 `student_id: str`，它就以为"哦我可以填一个 student_id"。 用户对话里说"我是 stu_bad，帮我下单"——LLM 真的可能就听他的，传 `student_id="stu_bad"` 进来。这就是**参数值幻觉导致的越权**。
-
-### 你怎么修的（Step 1）
-
-```python
-# ✅ 改造后：工具签名里根本没有 student_id 参数
-def make_tools_for_user(authenticated_sid: str):  # ← 闭包捕获认证身份
-    @tool
-    async def book_seat_tool(seat_id: int, duration: int) -> str:  # ← 签名里没有 student_id
-        """执行座位预定..."""
-        # 强制使用闭包里的认证身份，无视 LLM 任何输入
-        data = await booking_service.book(authenticated_sid, seat_id, duration)
-```
-
-**为什么这能防住幻觉**：
-
-1. LLM 看到的工具 schema 里**根本没有 student_id 这个参数**——它想编也没地方编
-2. 真正的 student_id 是 Python 闭包从 `AgentState["student_id"]` 里捕获的——这个值在用户登录时就被注入，对话过程中无法修改
-3. 即使 LLM 在对话里被用户骗了，决定"我要帮 stu_bad 下单"，它**物理上没法把这个想法表达出来**——工具签名只接受 `seat_id` 和 `duration`
-
-这就是从 **Prompt-level 软约束** → **代码-level 物理隔离** 的升级。
-
-### 面试时这样讲（45秒）
-
-> "参数值幻觉里最危险的一种是身份相关的参数。最早我的工具签名是 `book_seat_tool(student_id, seat_id, duration)`，student_id 由 LLM 自己填。我用 prompt 反复强调『必须用当前用户的学号』，但 prompt 是软约束——如果用户在对话里说『我是另一个学号』，LLM 就有可能听他的，造成越权。
->
-> 我的做法是把 student_id **直接从工具签名里删掉**，改成 `book_seat_tool(seat_id, duration)`。真正的 student_id 用 Python 闭包从 AgentState 捕获——这个值在 API 层认证通过后注入，对话过程中无法修改。
->
-> 这样防御就从 prompt-level 升级到了代码-level：LLM 看到的 schema 里压根没有 student_id 这个参数，它想编也没地方编。即使 prompt injection 把它骗到了，物理上也没法越权。"
-
-------
-
-## 总结一张表（面试时心里默念这张表）
-
-| 幻觉类型           | 防御机制                                           | 设计层次       |
-| ------------------ | -------------------------------------------------- | -------------- |
-| 工具名幻觉         | Pydantic Literal 枚举（Classify-then-Decide 架构） | 架构级消除     |
-| 参数名幻觉         | LangChain @tool 自动 JSON Schema                   | 框架级防御     |
-| 参数值幻觉（身份） | 工具签名层移除 + 闭包捕获认证身份                  | 代码级物理隔离 |
-
-**注意这三层的递进**：
-
-- 第一层是**架构选择**（不让LLM做决策）
-- 第二层是**框架红利**（用LangChain就有）
-- 第三层是**主动设计**（你Step 1的核心成果）
-
-讲面试时按这个顺序讲——从抽象到具体，从框架到自创——会显得很有层次感。
-
-------
-
-## ✋ 现在请你做
-
-**任务 1**：用你自己的话**口述一遍**这三层防御。可以参考我上面的"面试时这样讲"，但要用你的措辞。
-
-**任务 2**：回答我两个问题，确认你真懂了：
-
-**Q1**：如果一个面试官追问你——"你说工具签名删掉 student_id 防越权，那 service 层执行的时候不还是要 student_id 吗？这个值哪来的？"——你怎么答？
-
-**Q2**：如果面试官追问——"为什么你不直接在 service 层做权限校验，要在工具签名层做？"——你怎么答？
-
-这两个问题如果你答上来了，说明这个机制你真懂了，可以进 §2。 答不上来也没关系，告诉我，我帮你想清楚。
-
-
-
-
-
-## ✅**RRF 融合**
-
-#### 全称是 **Reciprocal Rank Fusion（倒数排序融合）**
-
-它是一种在信息检索（Search & Information Retrieval）领域非常经典且极具实操价值的算法。简单来说，RRF 的作用是：**将多个不同的搜索引擎或检索算法给出的多个排序结果，公平地融合成一个最终的、更优的排序列表。**
-
-在当今非常火热的大模型 RAG（检索增强生成）应用中，RRF 几乎是“混合检索（Hybrid Search）”的标配。
-
-以下是关于它的核心原理解析：
-
-### 1. 为什么要用 RRF？（解决的核心痛点）
-
-在混合检索中，我们通常会同时使用两套检索系统：
-
-- **向量检索（Vector Search）：** 擅长理解语义（例如搜“苹果手机”，能搜出“iPhone”）。它给出的分数通常是余弦相似度（如 0.85、0.92）。
-- **关键词检索（BM25）：** 擅长精准匹配（例如必须要包含特定的产品型号或专有名词）。它给出的分数是基于词频计算的（如 15.4、23.8）。
-
-**痛点在于：这两套系统的“分数”完全不在一个维度上，无法直接相加或比较。** 0.85 的向量相似度并不等同于 0.85 的 BM25 分数。如果强行做分数归一化（Normalization），很容易因为异常极值导致结果失真。
-
-RRF 就是为了解决“分数不可比”的问题而诞生的。**它完全抛弃了原始得分，只看文档在各自列表中的“排名（Rank）”。**
-
-### 2. RRF 的计算公式
-
-RRF 的核心思想是：排名越靠前的文档，得分越高，但得分衰减的速度是平缓的。它的公式非常简单：
-
-$RRF\_Score = \sum_{i\in R} \frac{1}{k + rank_i}$
-
-- **$rank_i$**：指的是某篇文档在第 $i$ 个检索结果列表中的**排名**（第 1 名就是 1，第 5 名就是 5）。
-- **$k$**：是一个平滑常数（Smoothing Constant）。在业内实践中，**$k$ 通常取值为 60**。如果一篇文档在某个列表中没有出现，则其排名趋于无穷大，该项得分为 0。
-
-### 3. RRF 的偏好：为何它如此有效？
-
-假设 $k=60$。我们来看看它在面临分歧时会偏向谁：
-
-- **文档 A：** 在向量检索排第 1，在关键词检索排第 100。
-  - 得分 = $1 / (60 + 1) + 1 / (60 + 100) \approx 0.01639 + 0.00625 = 0.02264$
-- **文档 B：** 在向量检索排第 10，在关键词检索排第 10。
-  - 得分 = $1 / (60 + 10) + 1 / (60 + 10) \approx 0.01428 + 0.01428 = 0.02856$
-
-**结果是文档 B 打败了文档 A。**
-
-这揭示了 RRF 最核心的智慧：**比起在某单一算法中表现极好但在另一算法中表现极差的“偏科生”，RRF 更偏爱在所有算法中表现都比较靠前的“全科生”。** 这种特性极大地提高了最终搜索结果的鲁棒性（Robustness）。
