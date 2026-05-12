@@ -39,9 +39,8 @@ class RetrievalService:
 
         # 两路并发召回
         # 1. 向量检索：如果大模型传了分类，我们就加上精准过滤！
-        vec_results = []
-        if category:
-            vec_results = self.vector_store.similarity_search(query, k=5, filter={"category": category})
+        filter_dict = {"category": category} if category else None
+        vec_results = self.vector_store.similarity_search(query, k=5, filter=filter_dict)
 
         bm25_results = self.bm25_retriever.invoke(query)
 
