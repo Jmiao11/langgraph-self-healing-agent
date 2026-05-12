@@ -12,10 +12,10 @@ from schemas.exceptions import (
 
 class BookingService:
     def __init__(self, mcp_tools):
-        # 接收原始 MCP 工具
         self.tools_map = {tool.name: tool for tool in mcp_tools}
         self.book_mcp = self.tools_map.get("book_seat_transaction")
         self.search_mcp = self.tools_map.get("search_free_seats")
+        self.user_info_mcp = self.tools_map.get("get_user_info")
 
     def _clean_mcp_output(self, raw_result) -> str:
         """专门负责处理 LangChain / MCP 恶心的多模态返回格式"""
@@ -78,4 +78,9 @@ class BookingService:
 
         # 如果 args 是空的 {}，FastMCP 那边会自动使用它自己的默认值，不会报错
         raw_result = await self.search_mcp.ainvoke(args)
+        return self._clean_mcp_output(raw_result)
+
+    async def get_user_info(self, student_id: str) -> str:
+        """查询用户的积分和违约信息（纯净接口）"""
+        raw_result = await self.user_info_mcp.ainvoke({"student_id": student_id})
         return self._clean_mcp_output(raw_result)

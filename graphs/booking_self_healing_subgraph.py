@@ -152,10 +152,7 @@ async def build_booking_app(llm):
         @tool
         async def get_my_info_tool() -> str:
             """查询当前登录用户的积分和违约信息。系统已自动绑定您的身份。"""
-            user_info_mcp = next(t for t in raw_mcp_tools if t.name == "get_user_info")
-            raw_result = await user_info_mcp.ainvoke({"student_id": authenticated_sid})
-            # 复用 service 层的清洗方法
-            return booking_service._clean_mcp_output(raw_result)
+            return await booking_service.get_user_info(authenticated_sid)
 
         return [book_seat_tool, search_free_seats_tool, get_my_info_tool]
 
