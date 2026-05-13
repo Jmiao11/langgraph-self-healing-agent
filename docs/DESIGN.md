@@ -1,4 +1,6 @@
-## 架构设计
+# 架构设计
+
+## 1. 项目目标与边界
 
 ### 1.1 核心目标
 
@@ -6,13 +8,10 @@
 
 ### 1.2 场景选型理由
 
-1，自习室有明确的业务规则，系统据此触发 business_rule_violation 分类、向用户合规拒答"
-
-2，自习室有资源争抢（座位有限），能触发resource_conflict，验证乐观锁/CAS，和自愈功能
-
-3，有用户身份概念，验证防止用户越权，进行安全设置
-
-4，既有结构化数据（座位/订单 SQL 表）又有非结构化数据（规章制度文档），能在同一项目内同时验证工具调用与 RAG 检索"。
+1. 自习室有明确的业务规则，系统据此触发 `business_rule_violation` 分类、向用户合规拒答。
+2. 自习室有资源争抢（座位有限），能触发 `resource_conflict`，验证乐观锁 / CAS（Compare-And-Swap）和自愈功能。
+3. 有用户身份概念，验证防止用户越权，进行安全设置。
+4. 既有结构化数据（座位 / 订单 SQL 表）又有非结构化数据（规章制度文档），能在同一项目内同时验证工具调用与 RAG 检索。
 
 ### 1.3 技术目标
 
@@ -24,15 +23,13 @@
 
 **支撑能力（工程基础盘）**
 
-2. **多层身份隔离的安全防御**：API 认证层 → 工具签名层 → 服务层的三道闸门。 
-3. **LangGraph 多子图编排与状态总线设计**：6 维 AgentState + 自定义 reducer + 全链路 trace。 
-4. **双路 RRF 融合的 RAG 检索**：BM25 字面量 + 向量语义 + LLM 自动元数据打标。
+1. **多层身份隔离的安全防御**:API 认证层 → 工具签名层 → 服务层的三道闸门。
+2. **LangGraph 多子图编排与状态总线设计**:6 维 AgentState + 自定义 reducer + 全链路 trace。
+3. **双路 RRF 融合的 RAG 检索**:BM25 字面量 + 向量语义 + LLM 自动元数据打标。
 
-**工具集成能力** 
+**工具集成能力**
 
-5. **MCP 协议接入与 Service 层异常映射**：LLM 工具失败的标准化路径。
-
-
+1. **MCP 协议接入与 Service 层异常映射**:LLM 工具失败的标准化路径。
 
 ### 1.4 已知限制与未来工作 (Out of Scope)
 
@@ -47,137 +44,137 @@
 
 
 
-## 口述版：
+## 2. 项目分层
 
-#### §1.1 项目目标（45秒）
+本项目采用四层架构：
 
-> "嗯，这个项目想解决一个很实际的问题。我们都知道现在 LLM 调工具不太靠谱，有四类典型的坑：
->
-> 第一是**工具调用失败**——比如座位被占、违约超限，工具返回错误，Agent 不知道怎么处理；
->
-> 第二是**工具幻觉**——LLM 会编一个不存在的工具名出来调用，或者编错参数；
->
-> 第三是**权限越界**——用户故意说『我是另一个学号』，让 LLM 用别人的账号下单；
->
-> 第四是 **prompt injection**——用户用提示词攻击让 LLM 越界。
->
-> 我用 LangGraph 搭了一个多 Agent 系统来处理这四类问题，验证一个 production-grade 的 LLM Agent 工程上到底要做哪些事。"
+1. **用户接入层**（`api.py`, `app.py`）：接 HTTP 请求和 UI，做认证，不写业务逻辑。
 
-#### §1.2 场景选型（30秒）
+2. **编排层**（`graphs/`）：基于 LangGraph，负责理解用户意图、派发到对应子图、管理对话状态和流转。是项目最复杂的一层。
 
-> "选自习室管理这个场景，是因为它有几个适合验证 Self-Healing Agent 的特征：
->
-> 一是有**明确的业务硬规则**，比如违约次数上限，能触发『业务规则拒绝』这类错误；
->
-> 二是有**资源争抢**，座位数量有限，能触发『资源冲突』，验证乐观锁和自愈策略；
->
-> 三是有**明确的用户身份**，能验证越权防御；
->
-> 四是**结构化数据和非结构化数据并存**——座位订单是 SQL 表，规章制度是文档——能在同一项目里同时验证工具调用和 RAG 检索。"
+3. **业务服务层**（`services/`）：把基础设施提供的原始能力包装成有业务语义的方法，注入业务逻辑（比如异常映射、RRF 融合排序）。
 
-#### §1.3 技术目标（60秒，**重点改了**）
+4. **基础设施层**（`infrastructure/`, `mcp_server/`, `data/`）：提供原始能力——LLM 实例、向量库、SQLite 持久化、MCP 工具，不知道这是个自习室项目。
 
-> "这个项目我分了三层目标：
->
-> **核心能力**是 **Self-Healing Agent 的工程化设计**，包含三个子机制：① 用 LLM 做错误语义分类（5 类），但**只让它分类，不让它决策**——决策由代码层查策略表完成，这是个 Classify-then-Decide 的双阶段架构；② 自愈次数熔断，防止无限重试导致级联故障；③ 全链路 trace 把决策路径记下来，方便调试。
->
-> **支撑能力**有三块：
->
-> 第一是**多层身份隔离**——不是靠 prompt 软约束，是靠**工具签名层物理隔离**：我把 student_id 参数直接从工具签名里删掉，用 Python 闭包从 AgentState 捕获认证身份，LLM 根本不可能传别人的学号。
->
-> 第二是 **LangGraph 多子图编排**——6 维状态总线 + 自定义 reducer 支持轮次级 trace 清零。
->
-> 第三是**双路 RRF 融合的 RAG 检索**——BM25 字面量召回 + 向量语义召回 + LLM 自动元数据打标，用 RRF 融合排序。
->
-> **工具集成层**是 MCP 协议接入 + Service 层异常映射——把 LLM 工具失败的原始错误码翻译成 Python 标准异常。"
+   
 
-#### §1.4 已知不足（30秒）
+## 3. 核心设计决策
 
-> "这个项目我刻意没做几件事：
->
-> 第一，**Booking 只实现了 Create**，没做 Read/Update/Delete——因为这些都是已实现工具的同质变体，不会触发新的架构挑战，工作量大概半天；
->
-> 第二，**没做数据库并发压测**——目前是 SQLite + WAL 模式，生产场景需要换成 PostgreSQL；
->
-> 第三，**LLM Pool 只接了 Kimi 一家 provider**，但架构上通过 init_llm_pool 工厂函数预留了切换扩展点，没实际验证 GPT/Claude；
->
-> 第四，**单元测试覆盖不足**，目前只有 summarize 节点有完整单测，其他靠手动黑盒验证。"
->
-> 
+### 3.2 Self-Healing Agent 的架构演进
 
-## 项目分层
+#### 3.2.1 问题陈述：为什么需要 Self-Healing？
 
-我的项目分四层：
+我的自习室场景下，工具调用失败有四种典型样态：资源被抢（座位 `SEAT_OCCUPIED`）、业务规则拦截（`VIOLATION_LIMIT` 违约超限）、参数越界（duration 超过 8 小时）、底层抖动（SQLite 锁库）。
 
-1. **用户接入层**（api.py, app.py）：接 HTTP 请求和 UI，做认证，不写业务逻辑。
-2. **编排层**（graphs/）：基于 LangGraph，负责**理解用户意图**、**派发到对应子图**、**管理对话状态和流转**。是项目最复杂的一层。
-3. **业务服务层**（services/）：把基础设施提供的原始能力**包装成有业务语义的方法**，注入业务逻辑（比如异常映射、RRF 融合排序）。
-4. **基础设施层**（infrastructure/, mcp_server/, data/）：提供原始能力——LLM 实例、向量库、SQLite 持久化、MCP 工具，不知道这是个自习室项目。
+这四种失败的处理路径完全不同——前两种用户能修，第三种 Agent 自己能修，第四种重试就能修。如果不显式处理，Agent 会把所有错误码当成自然语言扔回上下文里继续推理，结果要么陷入死循环，要么向用户编造一条"订单已生成"的虚假回复。Self-Healing 就是为了把这四类失败拆开，在代码层分别给出确定性的处理策略。
 
-#### Q2：BookingService.book() 被谁调用？调用谁？
+#### 3.2.2 V1：让 LLM 全权决策（含失败案例）
 
-你答："被编排层使用，调用基础设施层"。
+在最初的 V1 版本中，我犯了一个典型的工程错误：过度信任大模型，让 LLM 充当了全权决策者。
 
-✅ 大方向对。但**面试官追问时，你要能说出"编排层的哪个具体节点"**。
+当时我设计了一个 `RepairDecision` 数据结构，让 LLM 在捕获异常后同时输出四项内容：
 
-完整答案：
+```python
+class RepairDecision(BaseModel):
+    reasoning: str                  # 错误推理
+    action_type: Literal[...]       # 处理动作（已用 Literal 锁住选项）
+    suggested_tool: str             # 建议调用的工具
+    instruction_to_agent: str       # 给 Agent 的指令
+```
 
-> "BookingService.book() 被编排层的 booking_self_healing_subgraph 里的 book_seat_tool 调用——这是个 LangChain @tool 装饰的函数，作为 LLM 的工具暴露给 booking_agent。它本身调用的是基础设施层的 MCP server 暴露的 book_seat_transaction 工具。所以完整的调用链是：booking_agent (LLM 决策) → book_seat_tool (LangChain 工具) → BookingService.book() (服务层) → MCP book_seat_transaction (基础设施)。"
+实测中这个设计在 `VIOLATION_LIMIT`（违约超限）场景下翻车——LLM 一次推理里同时犯了两类错误：
 
-**这一段调用链你必须能背**。面试官最爱问"你这个工具是怎么被调到的"，能把这条链讲清楚的人，立刻被划进"懂工程的"那一档。
+- `reasoning`: "该限制属于业务硬规则，无法通过重试、换接口或调整参数绕过"
+- `action_type`: `"retry_with_new_params"` ← 跟自己的 reasoning 直接矛盾
+- `suggested_tool`: `"violation_service::query_violation_list"` ← 幻觉，编造了工具名
 
+这次翻车让我意识到一个本质问题：LLM 极度擅长"语义分析"，但极度不擅长"确定性决策"。让它在同一个节点既做理解又下决策，分裂是必然的。
 
+#### 3.2.3 V2：Classify-then-Decide 关注点分离
 
-## 细节详解
+为解决 V1 的幻觉和自相矛盾，我重构了整个决策链路，核心动作是：剥离 LLM 的决策权，只保留其分类权。
 
-### "check_tool_error 
+我将 `RepairDecision` 替换为 `ErrorClassification` 结构，砍掉了负责决策的 `action_type` 和自由发散的 `suggested_tool` 字段。现在，LLM 只需要回答"这是什么类型的错误"：
 
-是 LangGraph 里的一个**条件边路由函数**——也就是嗅探器。它在每次 ToolNode 执行后立刻被调用。
+```python
+class ErrorClassification(BaseModel):
+    reasoning: str
+    category: Literal[
+        "business_rule_violation",
+        "resource_conflict",
+        "invalid_params",
+        "transient_failure",
+        "unrecoverable"
+    ]
+    user_facing_summary: str
+```
 
-它的工作机制依赖一个**字符串约定**：我在 `book_seat_tool` 这个工具函数里规定，**工具失败时返回的字符串必须以 `[TOOL_ERROR]` 开头**——这个前缀是工具层捕获 BookingService 抛出的异常后人为加上的。
+被剥离出的决策权，在代码层引入的一张静态字典 `REPAIR_STRATEGY_MAP` 接手。LLM 输出 `category` 后，代码查表给出确定性策略：
 
-嗅探器的逻辑很简单：检查最新 ToolMessage 的内容是否含 `[TOOL_ERROR]`。含就路由到 error_analyzer 触发自愈，不含就回到 booking_agent 继续主流程。
+```python
+REPAIR_STRATEGY_MAP = {
+    "business_rule_violation": {
+        "should_retry": False,
+        "instruction": "向用户解释原因，禁止重试..."
+    },
+    "resource_conflict": {
+        "should_retry": True,
+        "instruction": "使用 search_free_seats 查询可用资源..."
+    }
+}
+```
 
-这个设计的关键在于——**'失败必须触发自愈'这件事由代码确定性保证，不依赖 LLM 自觉**。"
+我把这种架构称为 Classify-then-Decide（先分类后决策）。它的本质洞察是：让 LLM 分类错误类型，让代码回答如何解决。因为 `category` 被 `Literal` 严格锁死，LLM 无法编造不存在的错误类型；而因为策略表是硬编码的，分类结果一旦落地，下游的重试与兜底行为就不再受大模型幻觉的影响。
 
+#### 3.2.4 V3：Prompt 边界锚定（含失败案例）
 
+V2 改完后，我以为问题彻底解决了，但在第二个测试场景就翻车了。
 
-### "Classify-then-Decide
+在测试"座位被抢"（`SEAT_OCCUPIED`）错误时，LLM 给出的分类竟然是 `business_rule_violation`。它的推理逻辑是："座位状态不对，这属于业务规则层面的冲突"。
 
-是我做了一次架构重构后的成果。
+这次翻车暴露了一个隐蔽的问题：即使 Literal 锁死了输出空间，LLM 对这些概念的**语义边界**依旧会出错。在它的语料认知里，"资源不可用"和"违反业务规则"被混为一谈。如果分类第一步错了，V2 精心设计的策略表就会把系统带向深渊——判定为业务违规会直接熔断并拒答，而实际上这只是资源冲突，调工具换个座位就能解决。
 
-V1 设计是让 LLM **同时输出**：错误推理 + 处理动作类型 + 建议下一步调哪个工具。实测两个问题：① LLM 的 reasoning 和 action 经常自相矛盾，比如它分析说'这是业务规则限制无法重试'，但 action_type 还是选了 retry；② 'suggested_tool' 字段是自由文本，LLM 真的会编一个不存在的工具名出来。
+针对这个问题，我在 `error_analyzer_node` 的系统 Prompt 中引入了边界锚定，构建了四层防御：
 
-V2 我做了关注点分离——
+1. **头对头对比**：明确界定 `business_rule` 针对的是"用户身份/账户状态"，而 `resource_conflict` 针对的是"所请求的物理资源"。
+2. **判断口诀**：强行注入一个思考锚点——"换个对象（如换个座位）重试有用吗？"有用就是资源冲突，没用就是业务限制。
+3. **反例对照**：直接在 Prompt 里写死特例（明确指出 `SEAT_OCCUPIED` 几乎必然是 `resource_conflict`）。
+4. **兜底偏置**：规定拿不准时优先选 `unrecoverable`（保守策略，宁可误终止不可误重试）。
 
-- **阶段 1**：LLM 只输出**错误的语义分类**。用 Pydantic Literal 把输出空间锁死成 5 个有限值（business_rule_violation、resource_conflict、invalid_params、transient_failure、unrecoverable）。LLM 不能编新的分类。
-- **阶段 2**：代码层根据分类查策略表（REPAIR_STRATEGY_MAP）。should_retry 是 True 还是 False、instruction 模板长什么样，**全部由代码确定性决定**，没有自由发挥空间。
+#### 3.2.5 V4 演进方向：用代码确定性短路 LLM
 
-本质洞察是——**LLM 擅长理解语义，不擅长做确定性决策**。把它最容易出错的'决策环节'剥离给代码，留下它真正擅长的'语义理解'。"
+V3 跑通后，我意识到系统中还有一个架构层面的冗余张力没有彻底消除。
 
+在当前的底层服务中，所有的已知业务异常都已经静态声明了所属的分类属性（例如 `SeatOccupiedError.category = ErrorCategory.RESOURCE_CONFLICT`）。但 V3 的 `error_analyzer_node` 依然没有读取这个元数据，而是每次都从报错字符串中让 LLM 重新推理一遍。
 
+```python
+except BookingDomainError as e:
+    # 目前只传了 error_code 和 message，没有传 category
+    return f"[TOOL_ERROR] error_code={e.error_code}, message={e.message}"
+```
 
+这实际上违反了我在 V2 中确立的"把决策权交还给代码"的核心原则——既然代码层已经预先知道了错误属于哪一类，再去消耗 Token 让 LLM 做一次有概率出错的推断，不仅增加了延迟，更是架构上的妥协。
 
+为此，我规划了 V4 的演进路线：**基于异常元数据的短路路由**。在自愈节点入口增加旁路判断：
 
-### "熔断器
+- **已知异常**：如果捕获的错误自带 `category` 属性，直接跳过大模型，无缝进入代码路由表（0 LLM 调用，无需推断）。
+- **未知异常**：对于未预见的底层报错，再降级调用 LLM 进行语义分类兜底。
 
-是 AgentState 里的 `repair_attempts` 字段。
+```python
+except BookingDomainError as e:
+    # 携带 category 传给上游 analyzer，支持其直接走代码旁路
+    category_val = e.category.value if hasattr(e, 'category') else "unknown"
+    return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+```
 
-计数规则：**只在 error_analyzer_node 真正被调用时，由 analyzer 自身在返回值里 +1**。也就是说，统计的是'自愈尝试次数'，不是'工具失败次数'——一个工具失败不一定进入 analyzer（嗅探器要先识别 [TOOL_ERROR] 前缀），所以这两个数不一样。
+V4 的核心是承认一件事：架构原则只有在所有路径上都贯彻才算成立。V3 的代码层是确定性的，但 LLM 分类那一步把不确定性又引了回来。V4 用异常元数据把已知路径上的 LLM 调用彻底消除，才算真正让核心设计理念在整个 Self-Healing 链路上贯通。
 
-阈值我设为 2。analyzer 进入时第一件事就是检查计数器：超过阈值直接走熔断分支，注入一个'禁止再调任何工具，必须向用户坦诚说明'的 SystemMessage，强制 Agent 终止重试链路。
+#### 3.2.6 设计原则提炼
 
-还有一个关键细节——**每轮新对话开始时，计数器在 API 层被重置为 0**。否则跨多轮对话会一直累加，几轮之后就误熔断了。这是状态生命周期管理的体现。
+本项目从 V1 到 V4 的演进，本质上是为了控制大模型带来的不确定性，不断挤压大模型的自由发散空间，将控制权彻底收归确定性代码的轨迹。
 
-这一整套机制防的是**级联故障**——比如底层数据库挂了，每次调工具都失败，没有熔断的话 Agent 会在 Tool → Analyzer → Tool → Analyzer 的循环里把 context 撑爆。"
+LLM 在 Agent 链路中的唯一合法身份，是处理不可预见输入的"模糊语义翻译器"——负责在用户和系统报错的非结构化文本中提取结构化事实。而所有触及状态流转、动作决策和系统边界校验的操作，都必须由代码层确定性地完成。
 
+这一原则在本项目中被彻底贯彻为三个具体动作：剥离决策权的 Classify-then-Decide 架构、用 Prompt 强制锁死认知空间的边界锚定，以及用异常元数据消除冗余推理的 V4 短路路由。每一个动作，都在剥夺 LLM 不该拥有的权力。
 
-
-
-
-
-
-
-
-
-
+这件事远超出自习室场景的意义在于：它让我看清了 LLM 应用工程化的一个核心约束——系统的健壮性从来不取决于大模型有多聪明，而取决于代码的防御底线有多硬。作为一名 AI 工程师，我的工作不是去教大模型怎么做决策，而是写好那些确定性代码——哪怕大模型完全疯掉，系统也不会崩溃。
