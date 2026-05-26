@@ -36,12 +36,15 @@ if not st.session_state.logged_in:
                     "http://127.0.0.1:8000/api/login",
                     json={"student_id": input_id, "password": input_pwd}
                 )
+
                 if res.status_code == 200:
                     user_data = res.json()
                     st.session_state.logged_in = True
                     st.session_state.student_id = input_id
                     st.session_state.user_name = user_data["name"]
+                    st.session_state.token = user_data["token"]  # ⭐ 新增：存 token
                     st.rerun()
+
                 else:
                     st.error("学号或密码错误")
             except requests.exceptions.RequestException:  # ⭐ 核心修复：只捕获网络请求失败的异常
@@ -80,7 +83,13 @@ else:
                         "student_id": st.session_state.student_id,
                         "user_name": st.session_state.user_name
                     }
-                    res = requests.post("http://127.0.0.1:8000/api/chat", json=payload)
+                    # ⭐ 新增：加 Authorization header
+                    headers = {"Authorization": f"Bearer {st.session_state.token}"}
+                    res = requests.post(
+                        "http://127.0.0.1:8000/api/chat",
+                        json=payload,
+                        headers=headers  # ⭐
+                    )
                     if res.status_code == 200:
                         ans = res.json().get("response")
                         st.markdown(ans)
@@ -91,4 +100,4 @@ else:
                     st.error("网络异常，请确保 API 已启动")
 
 
-# 在终端手动输入 streamlit run app.py
+# streamlit run app.py
