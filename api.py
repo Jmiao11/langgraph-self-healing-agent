@@ -80,15 +80,19 @@ async def chat_endpoint(req: ChatRequest):
         f"3. 只能查询和操作该用户本人的数据，严禁越权操作。"
     )
 
-    # 构造新的状态：系统消息在前（定海神针），用户消息在后
+    # ⭐ 修复：给 SystemMessage 固定 id，确保会话级单例
+    # add_messages reducer 看到相同 id 会执行覆盖而非追加，
+    # 避免多轮对话累积出 N 份重复的身份声明。
+    IDENTITY_GUARD_MSG_ID = "system::api_identity_guard"
+
     init_state = {
         "messages": [
-            SystemMessage(content=identity_prompt),
+            SystemMessage(content=identity_prompt, id=IDENTITY_GUARD_MSG_ID),
             HumanMessage(content=req.message)
         ],
         "student_id": req.student_id,
         "user_name": req.user_name,
-        "repair_attempts": 0,  # ⭐ 每轮新对话重置自愈计数器
+        "repair_attempts": 0,
     }
 
     final_text = ""
@@ -109,6 +113,11 @@ async def chat_endpoint(req: ChatRequest):
     except Exception as e:
         print(f"❌ 系统异常: {str(e)}", file=sys.stderr)
         raise HTTPException(status_code=500, detail="服务器内部错误，请联系系统管理员")
+
+    # 验证完删掉
+    state_snapshot = await router_app.aget_state(config)
+    sys_count = sum(1 for m in state_snapshot.values["messages"] if m.type == "system")
+    print(f"🔍 [Debug] 当前 messages 中 SystemMessage 数量: {sys_count}")
 
     return ChatResponse(
         thread_id=thread_id,
