@@ -8,8 +8,11 @@ from langgraph.prebuilt import ToolNode, tools_condition
 # ⭐ 导入我们刚写好的核心服务
 from utils.security_policy import build_identity_guard
 
-dotenv.load_dotenv()
+from utils.message_filters import build_subgraph_message_view
+# ⭐ QA 子图自己的工具集
+QA_OWN_TOOLS = {"search_library_rules"}
 
+dotenv.load_dotenv()
 
 # ✅ 换成全局引入
 from schemas.state import AgentState
@@ -41,10 +44,15 @@ def build_qa_agentic_graph(retrieval_service, llm):
         student_id = state.get("student_id") or "未知用户"
         sys_msg = SystemMessage(content=build_identity_guard(student_id=student_id))
 
-        msgs = [sys_msg] + state["messages"]
+        # ⭐ 同样应用本地视图过滤
+        local_view = build_subgraph_message_view(
+            state["messages"],
+            own_tool_names=QA_OWN_TOOLS,
+        )
+        msgs = [sys_msg] + local_view
+
         response = llm_with_tools.invoke(msgs)
 
-        # ⭐ 记录 QA agent 决策
         has_tool_calls = bool(getattr(response, "tool_calls", None))
         trace_entry = {
             "node": "qa_agent",

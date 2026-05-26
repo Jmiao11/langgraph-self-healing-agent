@@ -18,6 +18,9 @@ from schemas.state import AgentState
 from services.booking_service import BookingService
 from utils.security_policy import build_identity_guard
 
+from utils.message_filters import build_subgraph_message_view
+BOOKING_OWN_TOOLS = {"book_seat_tool", "search_free_seats_tool", "get_my_info_tool"}
+
 import dotenv
 
 dotenv.load_dotenv()
@@ -162,24 +165,28 @@ async def build_booking_app(llm):
 
     async def booking_agent_node(state: AgentState):
         """主控大脑：负责与用户对话、决定调用什么工具"""
-        # ⭐ 核心：从 state 拿认证身份，构造专属工具集
         student_id = state.get("student_id")
         if not student_id:
-            # 防御性兜底：未认证用户不允许调用预定能力
             from langchain_core.messages import AIMessage
             return {
                 "messages": [AIMessage(content="⚠️ 系统未检测到您的认证身份，无法执行预定操作。请重新登录。")]
             }
 
-        # 为本次调用动态构建工具（绑定已认证身份）
         user_tools = make_tools_for_user(student_id)
         llm_with_tools = llm.bind_tools(user_tools)
 
         sys_msg = SystemMessage(content=build_identity_guard(student_id=student_id))
-        messages = [sys_msg] + state["messages"]
+
+        # ⭐ 关键改动：从全局 messages 中过滤本子图的本地视图
+        # 避免看到其他子图（如 qa）的工具调用记录污染上下文
+        local_view = build_subgraph_message_view(
+            state["messages"],
+            own_tool_names=BOOKING_OWN_TOOLS,
+        )
+        messages = [sys_msg] + local_view
+
         response = await llm_with_tools.ainvoke(messages)
 
-        # ⭐ 记录本次 agent 决策
         has_tool_calls = bool(getattr(response, "tool_calls", None))
         trace_entry = {
             "node": "booking_agent",
@@ -188,7 +195,6 @@ async def build_booking_app(llm):
         }
 
         return {"messages": [response], "trace": [trace_entry]}
-
 
     def error_analyzer_node(state: AgentState):
         """
