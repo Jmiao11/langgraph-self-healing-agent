@@ -80,21 +80,21 @@ def init_llm_pool() -> dict[str, BaseChatModel]:
         # 用途：路由分类、安全检测、guardrail 拒答
         # 特征：短输入、明确分类、低延迟敏感
         "fast": ChatOpenAI(
-            model="kimi-k2-turbo-preview",
+            model="moonshot-v1-8k",
             temperature=0,
             **common_kwargs
         ),
         # 用途：业务对话主控、错误分析、QA 检索 agent
         # 特征：多轮推理、工具调用、上下文敏感
         "reasoning": ChatOpenAI(
-            model="kimi-k2-turbo-preview",
+            model="moonshot-v1-32k",
             temperature=0.1,
             **common_kwargs
         ),
         # 用途：离线元数据抽取（构建知识库时用）
         # 特征：结构化输出强约束、对一致性要求高
         "extraction": ChatOpenAI(
-            model="kimi-k2-turbo-preview",
+            model="moonshot-v1-32k",
             temperature=0,
             **common_kwargs
         ),
