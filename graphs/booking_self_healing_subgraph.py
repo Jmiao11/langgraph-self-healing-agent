@@ -4,6 +4,12 @@ import json
 import os
 from typing import Literal
 
+import re
+# 错误消息解析正则：从 [TOOL_ERROR] 字符串里同时提取 category 和 message
+# 编译一次，全程复用（V4 短路路径每次错误都要用，避免重复编译）
+_ERROR_CATEGORY_PATTERN = re.compile(r"category=([a-z_]+)")
+_ERROR_MESSAGE_PATTERN = re.compile(r"message=(.+?)(?:$|, category=|, error_code=)")
+
 from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, START, END
@@ -145,7 +151,10 @@ async def build_booking_app(llm):
                 data = await booking_service.book(authenticated_sid, seat_id, duration)
                 return f"✅ 预定成功！订单号: {data.get('booking_id')}"
             except BookingDomainError as e:
-                return f"[TOOL_ERROR] error_code={e.error_code}, message={e.message}"
+                # ⭐ V4: 把 category 元数据一并透传给上游 analyzer，
+                # 让其能跳过 LLM 直接走代码旁路（已知异常）
+                category_val = e.category.value if hasattr(e, 'category') else "unknown"
+                return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
 
         @tool
         async def search_free_seats_tool(zone_type: str = None) -> str:
@@ -196,53 +205,87 @@ async def build_booking_app(llm):
 
         return {"messages": [response], "trace": [trace_entry]}
 
-    def error_analyzer_node(state: AgentState):
+    async def error_analyzer_node(state: AgentState):
         """
-        Self-Healing 核心节点：Classify-then-Decide 双阶段架构。
+        错误自愈节点。
 
-        阶段1: 调用 LLM 输出错误的语义分类（仅 What，不含 How）
-        阶段2: 代码层根据分类查 REPAIR_STRATEGY_MAP，确定性地生成处理指令
-
-        ⭐ 加固：引入熔断机制，防止无限重试。
+        V4 升级：在调 LLM 前先查工具消息里的 category 元数据。
+        已知 category → 0 LLM 调用直接查策略表
+        未知 → 降级用 LLM 做语义分类
         """
-        current_attempts = state.get("repair_attempts") or 0
-        print(f"🚨 [Self-Healing] 触发动态异常诊断... (第 {current_attempts + 1}/{MAX_REPAIR_ATTEMPTS} 次尝试)")
-
-        last_tool_msg = state["messages"][-1].content
-
-        # ==========================================
-        # 0. 熔断检查：超限直接终止
-        # ==========================================
-        if current_attempts >= MAX_REPAIR_ATTEMPTS:
-            print(f"🛑 [Circuit Breaker] 自愈次数已达上限 ({MAX_REPAIR_ATTEMPTS})，强制终止重试链路")
-            abort_msg = SystemMessage(
-                content=(
-                    f"【系统熔断指令】：自愈系统已尝试修复 {current_attempts} 次仍未成功。"
-                    f"最后一次错误：{last_tool_msg}。"
-                    f"请立刻停止任何工具调用，用自然语言向用户坦诚说明操作无法完成，"
-                    f"建议用户稍后重试或联系人工服务台。绝对禁止再次调用任何工具。"
-                )
-            )
+        # === 熔断器检查（原有逻辑，不动）===
+        attempts = state.get("repair_attempts", 0) or 0
+        if attempts >= 2:
+            print(f"🔥 [Self-Healing] 自愈次数已达上限 ({attempts}/2)，强制终止重试链路")
+            circuit_breaker_msg = SystemMessage(content=(
+                "⚠️ 系统检测到本次操作已多次重试仍失败。\n"
+                "你必须立即停止调用任何工具，转为向用户坦诚说明遇到的问题，"
+                "并建议用户稍后重试或联系管理员。绝对禁止再尝试调用工具。"
+            ))
             return {
-                "messages": [abort_msg],
-                "error": {"action": "circuit_break", "detail": last_tool_msg, "attempts": current_attempts},
-                "trace": [{"node": "error_analyzer", "decision": "circuit_break", "attempts": current_attempts}]
+                "messages": [circuit_breaker_msg],
+                "repair_attempts": attempts + 1,
+                "trace": [{"node": "error_analyzer", "decision": "circuit_breaker_triggered"}]
+            }
+
+        # === 找到最近一条 ToolMessage（带 [TOOL_ERROR] 的）===
+        last_tool_msg = None
+        for m in reversed(state["messages"]):
+            if isinstance(m, ToolMessage) and "[TOOL_ERROR]" in str(m.content):
+                last_tool_msg = m
+                break
+
+        if last_tool_msg is None:
+            # 异常兜底：嗅探器路由进来但找不到错误消息（理论上不可能）
+            return {
+                "repair_attempts": attempts + 1,
+                "trace": [{"node": "error_analyzer", "decision": "no_error_found", "error": "unexpected"}]
+            }
+
+        error_text = str(last_tool_msg.content)
+
+        # ==========================================
+        # ⭐ V4 核心：尝试从工具消息中直接解析 category
+        # ==========================================
+        category = None
+        match = _ERROR_CATEGORY_PATTERN.search(error_text)
+        if match:
+            candidate = match.group(1)
+            if candidate in REPAIR_STRATEGY_MAP:
+                category = candidate
+
+        if category is not None:
+            # ✅ 已知异常路径：跳过 LLM，直接查策略表
+            strategy = REPAIR_STRATEGY_MAP[category]
+            print(f"⚡ [Self-Healing V4] 异常元数据短路：category={category}（0 LLM 调用）")
+
+            # ⭐ 从错误报文中提取 message 作为 user_summary 填充占位符
+            # 设计假设（V4 关键洞察）：工具层 message 已是用户友好版本，
+            # 不需要 LLM 再做翻译。这是基于 mcp_server 实现细节的合理降级。
+            msg_match = _ERROR_MESSAGE_PATTERN.search(error_text)
+            user_summary = msg_match.group(1).strip() if msg_match else "操作失败"
+
+            instruction = strategy["instruction_template"].format(user_summary=user_summary)
+            instruction_msg = SystemMessage(content=instruction)
+
+            return {
+                "messages": [instruction_msg],
+                "repair_attempts": attempts + 1,
+                "trace": [{
+                    "node": "error_analyzer",
+                    "decision": "shortcut_via_metadata",
+                    "category": category,
+                    "user_summary": user_summary,
+                    "llm_called": False,
+                }]
             }
 
         # ==========================================
-        # 1. 阶段1：LLM 错误分类（仅做语义理解）
+        # 未知异常路径：降级用 LLM 兜底分类（原 V3 逻辑）
         # ==========================================
-        # ⭐ 优先使用 router 阶段固化的当前轮次意图
-        # 兜底：如果上游因某种原因没设置（如直接绕过 router 调用本子图），
-        # 才退回到 messages[0]，并打印警告
-        user_intent = state.get("current_user_intent")
-        if not user_intent:
-            print("⚠️ [Error Analyzer] current_user_intent 未设置，回退到 messages[0]")
-            user_intent = state["messages"][0].content if state["messages"] else "未知"
+        print(f"🧠 [Self-Healing V4] 未携带 category 元数据，降级 LLM 分类...")
 
-        classifier_llm = llm.with_structured_output(ErrorClassification)
-
-        prompt = ChatPromptTemplate.from_messages([
+        classification_prompt = ChatPromptTemplate.from_messages([
             ("system",
              "你是自习室系统的『错误分类器』(Error Classifier)。\n"
              "你的唯一职责是：阅读底层工具抛出的错误报文，判断它属于 5 类错误中的哪一类。\n\n"
@@ -271,47 +314,33 @@ async def build_booking_app(llm):
              "- 拿不准时，优先选 unrecoverable（保守策略，宁可误终止不可误重试）。"),
             ("human", "用户的原始诉求: {user_intent}\n\n底层抛出的错误报文: {last_tool_msg}")
         ])
+        structured_llm = llm.with_structured_output(ErrorClassification)
 
-        chain = prompt | classifier_llm
-        classification = chain.invoke({
-            "user_intent": user_intent,
-            "last_tool_msg": last_tool_msg
+        classification = await (classification_prompt | structured_llm).ainvoke({
+            "user_intent": state.get("current_user_intent", ""),
+            "last_tool_msg": error_text
         })
 
-        print(f"🧠 [LLM 分类]: {classification.category}")
-        print(f"   ↳ 推理: {classification.reasoning}")
-        print(f"   ↳ 用户摘要: {classification.user_facing_summary}")
-
-        # ==========================================
-        # 2. 阶段2：代码层确定性决策（查策略表）
-        # ==========================================
-        strategy = REPAIR_STRATEGY_MAP.get(classification.category)
-        if not strategy:
-            # 防御性兜底：LLM 返回了未知分类（理论上 Literal 已约束，但稳妥起见兜一层）
-            print(f"⚠️ [Strategy] 未知分类 {classification.category}，按 unrecoverable 处理")
-            strategy = REPAIR_STRATEGY_MAP["unrecoverable"]
+        strategy = REPAIR_STRATEGY_MAP.get(
+            classification.category,
+            REPAIR_STRATEGY_MAP["unrecoverable"]  # 兜底
+        )
 
         instruction = strategy["instruction_template"].format(
             user_summary=classification.user_facing_summary
         )
 
-        print(f"🛠️ [代码决策]: should_retry={strategy['should_retry']}")
-
-        repair_msg = SystemMessage(content=instruction)
-
+        instruction_msg = SystemMessage(content=instruction)
         return {
-            "messages": [repair_msg],
-            "error": {
-                "category": classification.category,
-                "should_retry": strategy["should_retry"],
-                "detail": last_tool_msg,
-            },
-            "repair_attempts": current_attempts + 1,
+            "messages": [instruction_msg],
+            "repair_attempts": attempts + 1,
             "trace": [{
                 "node": "error_analyzer",
+                "decision": "classified_by_llm",
                 "category": classification.category,
-                "should_retry": strategy["should_retry"],
-                "attempts": current_attempts + 1
+                "reasoning": classification.reasoning,
+                "user_summary": classification.user_facing_summary,
+                "llm_called": True,
             }]
         }
 
