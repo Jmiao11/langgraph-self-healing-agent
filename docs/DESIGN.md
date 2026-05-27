@@ -137,37 +137,40 @@ V2 改完后，我以为问题彻底解决了，但在第二个测试场景就�
 针对这个问题，我在 `error_analyzer_node` 的系统 Prompt 中引入了边界锚定，构建了四层防御：
 
 1. **头对头对比**：明确界定 `business_rule` 针对的是"用户身份/账户状态"，而 `resource_conflict` 针对的是"所请求的物理资源"。
+
 2. **判断口诀**：强行注入一个思考锚点——"换个对象（如换个座位）重试有用吗？"有用就是资源冲突，没用就是业务限制。
+
 3. **反例对照**：直接在 Prompt 里写死特例（明确指出 `SEAT_OCCUPIED` 几乎必然是 `resource_conflict`）。
+
 4. **兜底偏置**：规定拿不准时优先选 `unrecoverable`（保守策略，宁可误终止不可误重试）。
+
+   
 
 #### 3.2.5 V4 演进方向：用代码确定性短路 LLM
 
-V3 跑通后，我意识到系统中还有一个架构层面的冗余张力没有彻底消除。
+V3 跑通后，self-healing 链路在功能上已经闭合，但在原则上还有一处未贯彻的地方。
 
-在当前的底层服务中，所有的已知业务异常都已经静态声明了所属的分类属性（例如 `SeatOccupiedError.category = ErrorCategory.RESOURCE_CONFLICT`）。但 V3 的 `error_analyzer_node` 依然没有读取这个元数据，而是每次都从报错字符串中让 LLM 重新推理一遍。
+每一次工具调用失败，error_analyzer_node 都会触发一次 LLM 调用来做错误分类，即便这个错误是系统中早已定义好的已知异常（如 SEAT_OCCUPIED、VIOLATION_LIMIT），耗费Token。 对于每一个在 BookingDomainError 中已经携带了明确 category 元数据的异常，V3 仍然绕了一大圈——把代码已经知道答案的结构化元数据，交给 LLM 用自然语言重新推理一遍，再得出一个原本查表就能得到的答案。V2 已经把决策权交还给代码，但 V3 在分类那一步又把不确定性引了回来——原则只在部分路径上贯彻，不算成立。 
 
-```python
-except BookingDomainError as e:
-    # 目前只传了 error_code 和 message，没有传 category
-    return f"[TOOL_ERROR] error_code={e.error_code}, message={e.message}"
-```
+顺着这个反思往下看，V3 中 LLM 的冗余其实不止"分类"一处。V3 让 LLM 在 ErrorClassification 中同时输出 category 和 user_facing_summary，背后的设计假设是——工具层抛出的错误是给开发者看的技术描述，需要 LLM 翻译成用户能理解的语言。但回看 mcp_server 的实际实现，所有 message 字段本就是用户友好的中文描述（如"座位 1 当前已被占用"），LLM 的翻译职责从一开始就不成立。这是 V3 时期一个从未被审视的潜在假设——不是实现层面的疏漏，而是设计层面的错误前提。
 
-这实际上违反了我在 V2 中确立的"把决策权交还给代码"的核心原则——既然代码层已经预先知道了错误属于哪一类，再去消耗 Token 让 LLM 做一次有概率出错的推断，不仅增加了延迟，更是架构上的妥协。
+为此，V4 做了三处协同改动：
 
-为此，我规划了 V4 的演进路线：**基于异常元数据的短路路由**。在自愈节点入口增加旁路判断：
+1. **工具层透传元数据**：book_seat_tool 捕获 BookingDomainError 时，将 e.category.value 与 error_code、message 一起序列化进 [TOOL_ERROR] 字符串：[TOOL_ERROR] category=resource_conflict, error_code=SEAT_OCCUPIED, message=座位 1 当前已被占用
 
-- **已知异常**：如果捕获的错误自带 `category` 属性，直接跳过大模型，无缝进入代码路由表（0 LLM 调用，无需推断）。
-- **未知异常**：对于未预见的底层报错，再降级调用 LLM 进行语义分类兜底。
+2. **error_analyzer 旁路判定**：节点入口先用正则提取 category 字段。命中 REPAIR_STRATEGY_MAP 中已知分类时，直接查策略表跳过 LLM 调用，并用工具层 message 字段填充 instruction_template 中的 {user_summary} 占位符。
 
-```python
-except BookingDomainError as e:
-    # 携带 category 传给上游 analyzer，支持其直接走代码旁路
-    category_val = e.category.value if hasattr(e, 'category') else "unknown"
-    return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
-```
+3. **未知异常降级**：仅在异常未携带 category 元数据时（如未来新增的、尚未被领域异常体系覆盖的错误），才降级到 V3 的 LLM 语义分类作为兜底。
 
-V4 的核心是承认一件事：架构原则只有在所有路径上都贯彻才算成立。V3 的代码层是确定性的，但 LLM 分类那一步把不确定性又引了回来。V4 用异常元数据把已知路径上的 LLM 调用彻底消除，才算真正让核心设计理念在整个 Self-Healing 链路上贯通。
+**实测验证：**
+
+用户预定占用座位触发 SEAT_OCCUPIED 时，日志显示"⚡ [Self-Healing V4] 异常元数据短路：category=resource_conflict（0 LLM 调用）"，trace 中 llm_called 字段为 false。所有已知业务异常（SEAT_OCCUPIEDVIOLATION_LIMIT、INVALID_PARAM 等）在 error_analyzer 阶段实现 0 LLM 调用，仅当出现未预见的底层报错时才走 LLM 兜底分类。
+
+
+
+V4 的本质，是承认 V2 确立的"代码确定性 > LLM 不确定性"原则，只有在所有路径上都贯彻才算真正成立。至此，self-healing 链路上所有已知异常都不再依赖 LLM 参与——这也是下一节将要总结的设计原则能够立得住的真实落点。
+
+
 
 #### 3.2.6 设计原则提炼
 
