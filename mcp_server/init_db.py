@@ -58,16 +58,32 @@ def init_database():
         cursor.execute(
             "INSERT INTO users (student_id, name, password, violation_count) VALUES ('stu_bad', '违规大王', '123', 5)")
 
-        # 注入几个测试座位
+        # 座位数据测试：座位 1 和 2 预先标记为 OCCUPIED（对应下面的测试订单）
         test_seats = [
-            (1, '静音区', 'FREE'),
-            (2, '静音区', 'FREE'),
+            (1, '静音区', 'OCCUPIED'),  # 被 stu001 的订单占用
+            (2, '静音区', 'OCCUPIED'),  # 被 stu_bad 的订单占用
             (3, '讨论区', 'FREE'),
             (210, '算力区', 'FREE')
         ]
         cursor.executemany("INSERT INTO seats (seat_id, zone_type, status) VALUES (?, ?, ?)", test_seats)
 
+        # ⭐ CRUD 测试数据：预置几条订单以便测试 Read/Update/Delete
+        # - BKG_TEST0001: stu001 的活跃订单（可测试 cancel / update）
+        # - BKG_TEST0002: stu_bad 的订单（用于测试 NOT_YOUR_BOOKING 越权场景）
+        cursor.execute("DELETE FROM bookings")  # 清理旧数据
+        test_bookings = [
+            ('BKG_TEST0001', 'stu001', 1, 2, 'LOCKED'),  # stu001 占用座位 1，时长 2h
+            ('BKG_TEST0002', 'stu_bad', 2, 3, 'LOCKED'),  # stu_bad 占用座位 2，时长 3h
+        ]
+        cursor.executemany(
+            "INSERT INTO bookings (booking_id, student_id, seat_id, duration, status) VALUES (?, ?, ?, ?, ?)",
+            test_bookings
+        )
+
         conn.commit()
+        print("✅ 物理数据库建表与测试数据注入成功！")
+        print("   - 预置订单 BKG_TEST0001 (stu001)：用于测试 cancel/update")
+        print("   - 预置订单 BKG_TEST0002 (stu_bad)：用于测试越权防护")
         print("✅ 物理数据库建表与测试数据注入成功！")
 
 

@@ -82,3 +82,37 @@ class SeatNotFoundError(BookingDomainError):
 
     def __init__(self, message="座位号不存在"):
         super().__init__("SEAT_NOT_FOUND", message)
+
+
+# ==========================================
+# ⭐ CRUD 扩展：订单管理相关异常 (Read/Update/Delete)
+# ==========================================
+class BookingNotFoundError(BookingDomainError):
+    """订单号不存在（用户传错了 booking_id）"""
+    category = ErrorCategory.INVALID_PARAMS
+
+    def __init__(self, message="订单号不存在"):
+        super().__init__("BOOKING_NOT_FOUND", message)
+
+
+class NotYourBookingError(BookingDomainError):
+    """
+    越权操作：订单存在但不属于当前认证用户。
+
+    ⭐ 安全考虑：category 选 UNRECOVERABLE 而非 BUSINESS_RULE_VIOLATION。
+    业务规则违反会向用户解释具体原因（"你不能取消别人的订单"），
+    这会暴露"该订单存在"的信息。安全场景下应该静默拒绝，
+    不给攻击者任何关于资源存在性的探测信号。
+    """
+    category = ErrorCategory.UNRECOVERABLE
+
+    def __init__(self, message="操作无法完成"):
+        super().__init__("NOT_YOUR_BOOKING", message)
+
+
+class BookingAlreadyCancelledError(BookingDomainError):
+    """订单已经是 CANCELLED 状态，不能重复取消"""
+    category = ErrorCategory.BUSINESS_RULE_VIOLATION
+
+    def __init__(self, message="该订单已被取消，无法重复操作"):
+        super().__init__("BOOKING_ALREADY_CANCELLED", message)

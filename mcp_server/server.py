@@ -155,6 +155,204 @@ def book_seat_transaction(student_id: str, seat_id: int, duration: int) -> str:
 
 
 # ==========================================
+# ⭐ CRUD 扩展：订单的 R / U / D 操作
+# ==========================================
+
+@mcp.tool()
+def get_my_bookings(student_id: str) -> str:
+    """
+    查询当前用户的所有订单（包括 LOCKED 进行中 和 CANCELLED 已取消）。
+
+    参数:
+    - student_id: 用户学号（由认证层强制注入，不接受外部传值）
+    """
+    try:
+        with get_db() as conn:
+            bookings = conn.execute(
+                "SELECT booking_id, seat_id, duration, status FROM bookings WHERE student_id = ?",
+                (student_id,)
+            ).fetchall()
+
+            if not bookings:
+                return json.dumps({
+                    "success": True,
+                    "data": [],
+                    "message": "您还没有任何订单"
+                }, ensure_ascii=False)
+
+            booking_list = [
+                {
+                    "booking_id": b["booking_id"],
+                    "seat_id": b["seat_id"],
+                    "duration": b["duration"],
+                    "status": b["status"]
+                }
+                for b in bookings
+            ]
+
+            return json.dumps({
+                "success": True,
+                "data": booking_list
+            }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error_code": "DB_SYSTEM_ERROR",
+            "message": str(e)
+        }, ensure_ascii=False)
+
+
+@mcp.tool()
+def cancel_booking(student_id: str, booking_id: str) -> str:
+    """
+    取消一个订单，并释放对应座位。
+
+    ⭐ 关键设计：
+    1. 错误检查顺序严格遵循 "存在 → 归属 → 状态"，防止信息泄露
+    2. 取消订单 + 释放座位必须原子事务（SQLite 的 with conn: 自动管理）
+
+    参数:
+    - student_id: 用户学号（由认证层强制注入）
+    - booking_id: 要取消的订单号
+    """
+    try:
+        with get_db() as conn:
+            # === Step 1: 存在性检查 ===
+            booking = conn.execute(
+                "SELECT student_id, seat_id, status FROM bookings WHERE booking_id = ?",
+                (booking_id,)
+            ).fetchone()
+
+            if not booking:
+                return json.dumps({
+                    "success": False,
+                    "error_code": "BOOKING_NOT_FOUND",
+                    "message": f"订单 {booking_id} 不存在"
+                }, ensure_ascii=False)
+
+            # === Step 2: 归属校验（防越权）===
+            if booking["student_id"] != student_id:
+                # ⚠️ 安全：不暴露"订单存在"信息，只返回通用拒绝
+                return json.dumps({
+                    "success": False,
+                    "error_code": "NOT_YOUR_BOOKING",
+                    "message": "操作无法完成"
+                }, ensure_ascii=False)
+
+            # === Step 3: 状态校验 ===
+            if booking["status"] == "CANCELLED":
+                return json.dumps({
+                    "success": False,
+                    "error_code": "BOOKING_ALREADY_CANCELLED",
+                    "message": f"订单 {booking_id} 已被取消，无法重复操作"
+                }, ensure_ascii=False)
+
+            # === Step 4: 跨表原子事务 ===
+            # SQLite 的 with conn: 块会在退出时自动 commit，异常时 rollback
+            seat_id = booking["seat_id"]
+            conn.execute(
+                "UPDATE bookings SET status = 'CANCELLED' WHERE booking_id = ?",
+                (booking_id,)
+            )
+            conn.execute(
+                "UPDATE seats SET status = 'FREE' WHERE seat_id = ?",
+                (seat_id,)
+            )
+
+        return json.dumps({
+            "success": True,
+            "data": {
+                "booking_id": booking_id,
+                "seat_id": seat_id,
+                "status": "CANCELLED"
+            },
+            "message": f"订单 {booking_id} 已成功取消，座位 {seat_id} 已释放"
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error_code": "DB_SYSTEM_ERROR",
+            "message": f"底层数据库异常: {str(e)}"
+        }, ensure_ascii=False)
+
+
+@mcp.tool()
+def update_booking_duration(student_id: str, booking_id: str, new_duration: int) -> str:
+    """
+    修改订单时长。
+
+    错误检查同样遵循 "存在 → 归属 → 状态" 顺序。
+
+    参数:
+    - student_id: 用户学号（由认证层强制注入）
+    - booking_id: 要修改的订单号
+    - new_duration: 新的时长（小时，1-8）
+    """
+    # === Step 0: 参数预校验 ===
+    # 放在最前面，无需查 DB 即可拦截，节省一次连接
+    if new_duration <= 0 or new_duration > 8:
+        return json.dumps({
+            "success": False,
+            "error_code": "INVALID_PARAM",
+            "message": "时长必须在 1 到 8 小时之间"
+        }, ensure_ascii=False)
+
+    try:
+        with get_db() as conn:
+            # === Step 1: 存在性检查 ===
+            booking = conn.execute(
+                "SELECT student_id, status FROM bookings WHERE booking_id = ?",
+                (booking_id,)
+            ).fetchone()
+
+            if not booking:
+                return json.dumps({
+                    "success": False,
+                    "error_code": "BOOKING_NOT_FOUND",
+                    "message": f"订单 {booking_id} 不存在"
+                }, ensure_ascii=False)
+
+            # === Step 2: 归属校验 ===
+            if booking["student_id"] != student_id:
+                return json.dumps({
+                    "success": False,
+                    "error_code": "NOT_YOUR_BOOKING",
+                    "message": "操作无法完成"
+                }, ensure_ascii=False)
+
+            # === Step 3: 状态校验 ===
+            if booking["status"] == "CANCELLED":
+                return json.dumps({
+                    "success": False,
+                    "error_code": "BOOKING_ALREADY_CANCELLED",
+                    "message": f"订单 {booking_id} 已被取消，无法修改"
+                }, ensure_ascii=False)
+
+            # === Step 4: 单表 UPDATE ===
+            conn.execute(
+                "UPDATE bookings SET duration = ? WHERE booking_id = ?",
+                (new_duration, booking_id)
+            )
+
+        return json.dumps({
+            "success": True,
+            "data": {
+                "booking_id": booking_id,
+                "new_duration": new_duration
+            },
+            "message": f"订单 {booking_id} 时长已修改为 {new_duration} 小时"
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error_code": "DB_SYSTEM_ERROR",
+            "message": f"底层数据库异常: {str(e)}"
+        }, ensure_ascii=False)
+
+# ==========================================
 # 4. 启动服务
 # ==========================================
 if __name__ == "__main__":
