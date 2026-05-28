@@ -1,7 +1,5 @@
 #graphs/booking_self_healing_subgraph.py
 import sys
-import json
-import os
 from typing import Literal
 
 import re
@@ -25,8 +23,17 @@ from services.booking_service import BookingService
 from utils.security_policy import build_identity_guard
 
 from utils.message_filters import build_subgraph_message_view
-BOOKING_OWN_TOOLS = {"book_seat_tool", "search_free_seats_tool", "get_my_info_tool"}
 
+# ⭐ booking 子图自有的工具集（用于消息过滤器识别归属）
+# 新增 3 个 CRUD 工具：get_my_bookings_tool / cancel_booking_tool / update_booking_duration_tool
+BOOKING_OWN_TOOLS = {
+    "book_seat_tool",
+    "search_free_seats_tool",
+    "get_my_info_tool",
+    "get_my_bookings_tool",
+    "cancel_booking_tool",
+    "update_booking_duration_tool",
+}
 import dotenv
 
 dotenv.load_dotenv()
@@ -74,9 +81,11 @@ REPAIR_STRATEGY_MAP = {
     "unrecoverable": {
         "should_retry": False,
         "instruction_template": (
-            "【系统诊断】：不可恢复错误（{user_summary}）。"
-            "【强指令】：禁止再调用任何工具。直接向用户坦诚说明操作无法完成，"
-            "并建议联系人工服务台。"
+            "【系统诊断】：不可恢复错误。"
+            "【强指令】：禁止再调用任何工具。"
+            "请用最简短的语言告知用户『操作无法完成，请联系人工服务台』即可。"
+            "⚠️ 安全要求：禁止在回复中提及具体的 booking_id、座位号、错误码或任何"
+            "可能让用户推断出资源存在性 / 归属关系的细节。"
         )
     },
 }
@@ -166,7 +175,83 @@ async def build_booking_app(llm):
             """查询当前登录用户的积分和违约信息。系统已自动绑定您的身份。"""
             return await booking_service.get_user_info(authenticated_sid)
 
-        return [book_seat_tool, search_free_seats_tool, get_my_info_tool]
+        # ==========================================
+        # ⭐ CRUD 扩展工具（R / U / D）
+        # ==========================================
+
+        @tool
+        async def get_my_bookings_tool() -> str:
+            """
+            查询当前登录用户的所有订单（包括进行中和已取消的）。
+            系统已自动绑定您的身份，无需提供学号。
+            """
+            try:
+                bookings = await booking_service.get_my_bookings(authenticated_sid)
+                if not bookings:
+                    return "您当前没有任何订单记录。"
+                # 把订单列表格式化成 LLM 易读的结构
+                lines = [f"找到 {len(bookings)} 条订单："]
+                for b in bookings:
+                    lines.append(
+                        f"- 订单号: {b['booking_id']} | 座位: {b['seat_id']} | "
+                        f"时长: {b['duration']}h | 状态: {b['status']}"
+                    )
+                return "\n".join(lines)
+            except BookingDomainError as e:
+                category_val = e.category.value if hasattr(e, 'category') else "unknown"
+                return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+
+        @tool
+        async def cancel_booking_tool(booking_id: str) -> str:
+            """
+            取消一个订单。订单取消后座位会自动释放。
+
+            参数:
+            - booking_id: 要取消的订单号（例如 BKG_TEST0001）
+
+            注意：只能取消您本人的订单。
+            """
+            try:
+                data = await booking_service.cancel_booking(authenticated_sid, booking_id)
+                return (
+                    f"✅ 订单 {data.get('booking_id')} 已成功取消，"
+                    f"座位 {data.get('seat_id')} 已释放。"
+                )
+            except BookingDomainError as e:
+                category_val = e.category.value if hasattr(e, 'category') else "unknown"
+                return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+
+        @tool
+        async def update_booking_duration_tool(booking_id: str, new_duration: int) -> str:
+            """
+            修改订单的时长。
+
+            参数:
+            - booking_id: 要修改的订单号（例如 BKG_TEST0001）
+            - new_duration: 新的时长（小时，1-8）
+
+            注意：只能修改您本人的、未取消的订单。
+            """
+            try:
+                data = await booking_service.update_booking_duration(
+                    authenticated_sid, booking_id, new_duration
+                )
+                return (
+                    f"✅ 订单 {data.get('booking_id')} 的时长已修改为 "
+                    f"{data.get('new_duration')} 小时。"
+                )
+            except BookingDomainError as e:
+                category_val = e.category.value if hasattr(e, 'category') else "unknown"
+                return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+
+        return [
+            book_seat_tool,
+            search_free_seats_tool,
+            get_my_info_tool,
+            get_my_bookings_tool,
+            cancel_booking_tool,
+            update_booking_duration_tool,
+        ]
 
     # ==========================================
     # 2. 定义 Graph Nodes (图节点)
@@ -265,7 +350,12 @@ async def build_booking_app(llm):
             msg_match = _ERROR_MESSAGE_PATTERN.search(error_text)
             user_summary = msg_match.group(1).strip() if msg_match else "操作失败"
 
-            instruction = strategy["instruction_template"].format(user_summary=user_summary)
+            # 兼容写法：模板可能不带 {user_summary}（如 unrecoverable 路径）
+            try:
+                instruction = strategy["instruction_template"].format(user_summary=user_summary)
+            except KeyError:
+                # 模板无占位符，直接用原文
+                instruction = strategy["instruction_template"]
             instruction_msg = SystemMessage(content=instruction)
 
             return {
@@ -326,9 +416,12 @@ async def build_booking_app(llm):
             REPAIR_STRATEGY_MAP["unrecoverable"]  # 兜底
         )
 
-        instruction = strategy["instruction_template"].format(
-            user_summary=classification.user_facing_summary
-        )
+        if classification.category == "unrecoverable":
+            instruction = strategy["instruction_template"]
+        else:
+            instruction = strategy["instruction_template"].format(
+                user_summary=classification.user_facing_summary
+            )
 
         instruction_msg = SystemMessage(content=instruction)
         return {
@@ -360,18 +453,24 @@ async def build_booking_app(llm):
     # 极致精简的异常嗅探器 (不用再解包 JSON 了！)
     # ==========================================
     def check_tool_error(state: AgentState):
-        """嗅探器：通过特征字符串拦截异常"""
+        """
+        嗅探器：通过特征字符串拦截异常。
+
+        ⭐ 拦截范围 = BOOKING_OWN_TOOLS（本子图所有工具）。
+        任何一个 booking 子图的工具抛 [TOOL_ERROR] 都要走 self-healing，
+        不能只针对 book_seat_tool——否则新增工具时会绕过自愈链路、
+        把原始错误字符串直接喂给 LLM，造成信息泄露或胡乱推理。
+        """
         last_msg = state["messages"][-1]
 
-        # 只拦截 book_seat_tool 的输出
-        if getattr(last_msg, "name", "") != "book_seat_tool":
+        # 只拦截本子图工具的输出（其他子图的 ToolMessage 不归我管）
+        if getattr(last_msg, "name", "") not in BOOKING_OWN_TOOLS:
             return "booking_agent"
 
         content_str = str(last_msg.content)
 
-        # 极其优雅的判定：只要 Tool 返回了带有特定前缀的字符串，立刻路由去自愈！
         if "[TOOL_ERROR]" in content_str:
-            print(f"⚠️ [Graph 嗅探] 捕获到业务拦截信号，转向 Error Analyzer...")
+            print(f"⚠️ [Graph 嗅探] 捕获到业务拦截信号 (tool={last_msg.name})，转向 Error Analyzer...")
             return "error_analyzer"
 
         return "booking_agent"
