@@ -39,7 +39,7 @@
 | V3   | Prompt 边界锚定（四层防御）       | 解决 LLM 语义边界混淆（SEAT_OCCUPIED 被误分类） |
 | V4   | 异常元数据短路路由                | 已知异常 0 LLM 调用，移除错误的设计前提         |
 
-> 完整演进细节见 [`docs/DESIGN.md §3.2`](https://claude.ai/chat/docs/DESIGN.md)。
+> 完整演进细节见 [`docs/DESIGN.md` §3.2](docs/DESIGN.md)
 
 ### 多层身份隔离
 
