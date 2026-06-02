@@ -16,7 +16,7 @@ from infrastructure.dependencies import (
 from services.retrieval_service import RetrievalService
 
 from utils.auth import generate_token, verify_token
-from fastapi import Header
+from fastapi import Header, Depends
 
 router_app = None
 
@@ -128,6 +128,106 @@ async def chat_endpoint(req: ChatRequest, authorization: str = Header(None)):
         thread_id=thread_id,
         response=final_text
     )
+
+
+# ==========================================
+# ⭐ 只读数据面板端点（读写分离 /  雏形）
+# =============================CQRS=============
+# 设计纪律：
+#   - 写路径仍只走 Agent → BookingService → MCP（含自愈），此处绝不写库
+#   - 用 SQLite mode=ro 连接，从【物理层面】禁止写操作——即使代码误写
+#     UPDATE 也会被 SQLite 拒绝，不靠"自觉不写"这种软约束
+#   - student_id 一律从 token 解析，无视前端传值（与 /api/chat 同源身份）
+READONLY_DB_PATH = "./mcp_server/dream_room.db"
+
+
+def get_readonly_db() -> sqlite3.Connection:
+    """打开只读 DB 连接。mode=ro 物理禁止写操作。
+    mode=ro 是物理保证,不是约定——和你项目里"工具签名物理删除 student_id"是同一种设计哲学:
+    不靠"我记得别在这写库",靠底层机制让错误根本不可能发生。
+    """
+    conn = sqlite3.connect(f"file:{READONLY_DB_PATH}?mode=ro", uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+async def get_authenticated_sid(authorization: str = Header(None)) -> str:
+    """复用 HMAC 鉴权：从 Bearer token 解析已认证学号。
+    抽成 Depends 依赖，供所有需要身份的只读端点复用。
+    （/api/chat 暂不改动，仍走其内联逻辑，避免触碰写路径）"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未授权访问：缺少 Bearer token")
+    token = authorization.removeprefix("Bearer ").strip()
+    sid = verify_token(token)
+    if not sid:
+        raise HTTPException(status_code=401, detail="未授权访问：token 无效或已过期")
+    return sid
+
+
+@app.get("/api/seats")
+async def get_seats_endpoint(student_id: str = Depends(get_authenticated_sid)):
+    """返回全部座位状态。is_mine 标记当前用户占用的座位（前端高亮用）。"""
+    conn = get_readonly_db()
+    try:
+        # 当前用户 LOCKED 订单占用的座位集合 → 用于 is_mine 高亮
+        my_seat_ids = {
+            r["seat_id"] for r in conn.execute(
+                "SELECT seat_id FROM bookings WHERE student_id = ? AND status = 'LOCKED'",
+                (student_id,)
+            ).fetchall()
+        }
+        seat_rows = conn.execute(
+            "SELECT seat_id, zone_type, status FROM seats ORDER BY zone_type, seat_id"
+        ).fetchall()
+        seats = [
+            {
+                "seat_id": r["seat_id"],
+                "zone_type": r["zone_type"],
+                "status": r["status"],
+                "is_mine": r["seat_id"] in my_seat_ids,
+            }
+            for r in seat_rows
+        ]
+        return {"success": True, "data": seats}
+    except Exception as e:
+        print(f"❌ [/api/seats] 查询异常: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="座位数据查询失败")
+    finally:
+        conn.close()
+
+
+@app.get("/api/my-bookings")
+async def get_my_bookings_endpoint(student_id: str = Depends(get_authenticated_sid)):
+    """返回当前用户的所有订单（含 zone_type，前端展示更友好）。
+    student_id 强制取自 token，无法查询他人订单。"""
+    conn = get_readonly_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT b.booking_id, b.seat_id, b.duration, b.status, s.zone_type
+            FROM bookings b
+            LEFT JOIN seats s ON b.seat_id = s.seat_id
+            WHERE b.student_id = ?
+            ORDER BY b.status, b.booking_id
+            """,
+            (student_id,)
+        ).fetchall()
+        bookings = [
+            {
+                "booking_id": r["booking_id"],
+                "seat_id": r["seat_id"],
+                "zone_type": r["zone_type"],
+                "duration": r["duration"],
+                "status": r["status"],
+            }
+            for r in rows
+        ]
+        return {"success": True, "data": bookings}
+    except Exception as e:
+        print(f"❌ [/api/my-bookings] 查询异常: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="订单数据查询失败")
+    finally:
+        conn.close()
 
 
 def verify_user_from_db(student_id: str, password: str):
