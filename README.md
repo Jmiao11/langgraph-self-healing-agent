@@ -96,7 +96,7 @@ streamlit run app.py
 | 关键词检索 | BM25（rank-bm25）                          |
 | 工具协议   | MCP（Model Context Protocol）              |
 | 持久化     | SQLite + WAL 模式，AsyncSqliteSaver        |
-| Web 层     | FastAPI + Streamlit                        |
+| Web 层     | FastAPI（api层） + Streamlit（前端）       |
 | 安全       | HMAC-SHA256（Python 标准库，0 第三方依赖） |
 
 ------
