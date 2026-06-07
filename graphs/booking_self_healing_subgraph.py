@@ -128,6 +128,164 @@ class ErrorClassification(BaseModel):
         description="用一两句通俗的话向终端用户解释发生了什么（不要暴露 error_code 等技术细节）。"
     )
 
+
+# ==========================================
+# ⭐ 自愈决策核心逻辑（从闭包中抽出，便于单元测试）
+# ==========================================
+# 设计动机：原 error_analyzer_node 定义在 build_booking_app 闭包内，
+# 依赖捕获的 llm，无法独立 import 测试。抽成模块级纯函数后：
+#   - llm 作为参数显式注入（依赖注入）→ 测试可传 mock
+#   - 不触碰 MCP / 闭包 → 可零副作用单测
+#   - 闭包内的 error_analyzer_node 退化为一行委托
+async def analyze_error(state: AgentState, llm, max_attempts: int = MAX_REPAIR_ATTEMPTS) -> dict:
+    """
+    错误自愈决策核心。
+
+    V4 路径：
+      已知 category（工具消息带元数据）→ 0 LLM 调用，直接查策略表
+      未知 → 降级用 llm 做语义分类
+
+    Args:
+        state: AgentState，需含 messages / repair_attempts / current_user_intent
+        llm: 语言模型（仅未知异常降级路径会用到）。注入以便测试 mock。
+        max_attempts: 熔断阈值，默认 MAX_REPAIR_ATTEMPTS
+    Returns:
+        LangGraph 节点标准返回 dict（messages / repair_attempts / trace）
+    """
+    # === 熔断器检查 ===
+    attempts = state.get("repair_attempts", 0) or 0
+    if attempts >= max_attempts:
+        print(f"🔥 [Self-Healing] 自愈次数已达上限 ({attempts}/{max_attempts})，强制终止重试链路")
+        circuit_breaker_msg = SystemMessage(content=(
+            "⚠️ 系统检测到本次操作已多次重试仍失败。\n"
+            "你必须立即停止调用任何工具，转为向用户坦诚说明遇到的问题，"
+            "并建议用户稍后重试或联系管理员。绝对禁止再尝试调用工具。"
+        ))
+        return {
+            "messages": [circuit_breaker_msg],
+            "repair_attempts": attempts + 1,
+            "trace": [{"node": "error_analyzer", "decision": "circuit_breaker_triggered"}]
+        }
+
+    # === 找到最近一条带 [TOOL_ERROR] 的 ToolMessage ===
+    last_tool_msg = None
+    for m in reversed(state["messages"]):
+        if isinstance(m, ToolMessage) and "[TOOL_ERROR]" in str(m.content):
+            last_tool_msg = m
+            break
+
+    if last_tool_msg is None:
+        return {
+            "repair_attempts": attempts + 1,
+            "trace": [{"node": "error_analyzer", "decision": "no_error_found", "error": "unexpected"}]
+        }
+
+    error_text = str(last_tool_msg.content)
+
+    # ==========================================
+    # ⭐ V4 核心：尝试从工具消息中直接解析 category
+    # ==========================================
+    category = None
+    match = _ERROR_CATEGORY_PATTERN.search(error_text)
+    if match:
+        candidate = match.group(1)
+        if candidate in REPAIR_STRATEGY_MAP:
+            category = candidate
+
+    if category is not None:
+        # ✅ 已知异常路径：跳过 LLM，直接查策略表
+        strategy = REPAIR_STRATEGY_MAP[category]
+        print(f"⚡ [Self-Healing V4] 异常元数据短路：category={category}（0 LLM 调用）")
+
+        msg_match = _ERROR_MESSAGE_PATTERN.search(error_text)
+        user_summary = msg_match.group(1).strip() if msg_match else "操作失败"
+
+        try:
+            instruction = strategy["instruction_template"].format(user_summary=user_summary)
+        except KeyError:
+            instruction = strategy["instruction_template"]
+        instruction_msg = SystemMessage(content=instruction)
+
+        return {
+            "messages": [instruction_msg],
+            "repair_attempts": attempts + 1,
+            "trace": [{
+                "node": "error_analyzer",
+                "decision": "shortcut_via_metadata",
+                "category": category,
+                "user_summary": user_summary,
+                "llm_called": False,
+            }]
+        }
+
+    # ==========================================
+    # 未知异常路径：降级用 LLM 兜底分类
+    # ==========================================
+    print(f"🧠 [Self-Healing V4] 未携带 category 元数据，降级 LLM 分类...")
+
+    classification_prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "你是自习室系统的『错误分类器』(Error Classifier)。\n"
+         "你的唯一职责是：阅读底层工具抛出的错误报文，判断它属于 5 类错误中的哪一类。\n\n"
+         "⚠️ 你不需要决定『怎么处理这个错误』——处理策略由系统代码层根据你的分类自动决定。\n"
+         "你只需要做好『语义分类』这一件事。\n\n"
+         "【关键边界澄清 - 必读】\n"
+         "business_rule_violation 与 resource_conflict 容易混淆，必须区分：\n"
+         "- **business_rule_violation**：拒绝是针对【用户身份/账户状态】的。\n"
+         "  例如：违约超限、积分不足、账户冻结、未实名。\n"
+         "  特征：换一个『资源』也救不了，因为问题出在『用户身上』。\n"
+         "- **resource_conflict**：拒绝是针对【所请求的资源】的。\n"
+         "  例如：座位已被占（SEAT_OCCUPIED）、订单已锁定、库存售罄、文档被他人编辑中。\n"
+         "  特征：换一个『资源』就能成功，问题不在用户身上。\n\n"
+         "【判断口诀】：问自己一句『换个对象重试有用吗？』\n"
+         "- 有用 → resource_conflict\n"
+         "- 没用（限制锁在用户身上） → business_rule_violation\n\n"
+         "【其他三类】\n"
+         "- invalid_params：参数本身不合法（时长越界、ID格式错），修参数就行。\n"
+         "- transient_failure：底层抖动（DB连接超时、网络波动），重试可恢复。\n"
+         "- unrecoverable：用户不存在、权限拒绝、未知错误。\n\n"
+         "【自检要点】\n"
+         "- 仔细读 error_code 字面含义。SEAT_OCCUPIED 这类带具体资源名的错误码，\n"
+         "  几乎必然是 resource_conflict 而非 business_rule。\n"
+         "- VIOLATION_LIMIT、INSUFFICIENT_POINTS 这类带用户状态名的错误码，\n"
+         "  才是 business_rule。\n"
+         "- 拿不准时，优先选 unrecoverable（保守策略，宁可误终止不可误重试）。"),
+        ("human", "用户的原始诉求: {user_intent}\n\n底层抛出的错误报文: {last_tool_msg}")
+    ])
+    structured_llm = llm.with_structured_output(ErrorClassification)
+
+    classification = await (classification_prompt | structured_llm).ainvoke({
+        "user_intent": state.get("current_user_intent", ""),
+        "last_tool_msg": error_text
+    })
+
+    strategy = REPAIR_STRATEGY_MAP.get(
+        classification.category,
+        REPAIR_STRATEGY_MAP["unrecoverable"]
+    )
+
+    if classification.category == "unrecoverable":
+        instruction = strategy["instruction_template"]
+    else:
+        instruction = strategy["instruction_template"].format(
+            user_summary=classification.user_facing_summary
+        )
+
+    instruction_msg = SystemMessage(content=instruction)
+    return {
+        "messages": [instruction_msg],
+        "repair_attempts": attempts + 1,
+        "trace": [{
+            "node": "error_analyzer",
+            "decision": "classified_by_llm",
+            "category": classification.category,
+            "reasoning": classification.reasoning,
+            "user_summary": classification.user_facing_summary,
+            "llm_called": True,
+        }]
+    }
+
+
 async def build_booking_app(llm):
     print("⏳ [Booking Graph] 正在连接本地 MCP 服务，组装纯净工具箱...")
 
@@ -291,151 +449,8 @@ async def build_booking_app(llm):
         return {"messages": [response], "trace": [trace_entry]}
 
     async def error_analyzer_node(state: AgentState):
-        """
-        错误自愈节点。
-
-        V4 升级：在调 LLM 前先查工具消息里的 category 元数据。
-        已知 category → 0 LLM 调用直接查策略表
-        未知 → 降级用 LLM 做语义分类
-        """
-        # === 熔断器检查（原有逻辑，不动）===
-        attempts = state.get("repair_attempts", 0) or 0
-        if attempts >= 2:
-            print(f"🔥 [Self-Healing] 自愈次数已达上限 ({attempts}/2)，强制终止重试链路")
-            circuit_breaker_msg = SystemMessage(content=(
-                "⚠️ 系统检测到本次操作已多次重试仍失败。\n"
-                "你必须立即停止调用任何工具，转为向用户坦诚说明遇到的问题，"
-                "并建议用户稍后重试或联系管理员。绝对禁止再尝试调用工具。"
-            ))
-            return {
-                "messages": [circuit_breaker_msg],
-                "repair_attempts": attempts + 1,
-                "trace": [{"node": "error_analyzer", "decision": "circuit_breaker_triggered"}]
-            }
-
-        # === 找到最近一条 ToolMessage（带 [TOOL_ERROR] 的）===
-        last_tool_msg = None
-        for m in reversed(state["messages"]):
-            if isinstance(m, ToolMessage) and "[TOOL_ERROR]" in str(m.content):
-                last_tool_msg = m
-                break
-
-        if last_tool_msg is None:
-            # 异常兜底：嗅探器路由进来但找不到错误消息（理论上不可能）
-            return {
-                "repair_attempts": attempts + 1,
-                "trace": [{"node": "error_analyzer", "decision": "no_error_found", "error": "unexpected"}]
-            }
-
-        error_text = str(last_tool_msg.content)
-
-        # ==========================================
-        # ⭐ V4 核心：尝试从工具消息中直接解析 category
-        # ==========================================
-        category = None
-        match = _ERROR_CATEGORY_PATTERN.search(error_text)
-        if match:
-            candidate = match.group(1)
-            if candidate in REPAIR_STRATEGY_MAP:
-                category = candidate
-
-        if category is not None:
-            # ✅ 已知异常路径：跳过 LLM，直接查策略表
-            strategy = REPAIR_STRATEGY_MAP[category]
-            print(f"⚡ [Self-Healing V4] 异常元数据短路：category={category}（0 LLM 调用）")
-
-            # ⭐ 从错误报文中提取 message 作为 user_summary 填充占位符
-            # 设计假设（V4 关键洞察）：工具层 message 已是用户友好版本，
-            # 不需要 LLM 再做翻译。这是基于 mcp_server 实现细节的合理降级。
-            msg_match = _ERROR_MESSAGE_PATTERN.search(error_text)
-            user_summary = msg_match.group(1).strip() if msg_match else "操作失败"
-
-            # 兼容写法：模板可能不带 {user_summary}（如 unrecoverable 路径）
-            try:
-                instruction = strategy["instruction_template"].format(user_summary=user_summary)
-            except KeyError:
-                # 模板无占位符，直接用原文
-                instruction = strategy["instruction_template"]
-            instruction_msg = SystemMessage(content=instruction)
-
-            return {
-                "messages": [instruction_msg],
-                "repair_attempts": attempts + 1,
-                "trace": [{
-                    "node": "error_analyzer",
-                    "decision": "shortcut_via_metadata",
-                    "category": category,
-                    "user_summary": user_summary,
-                    "llm_called": False,
-                }]
-            }
-
-        # ==========================================
-        # 未知异常路径：降级用 LLM 兜底分类（原 V3 逻辑）
-        # ==========================================
-        print(f"🧠 [Self-Healing V4] 未携带 category 元数据，降级 LLM 分类...")
-
-        classification_prompt = ChatPromptTemplate.from_messages([
-            ("system",
-             "你是自习室系统的『错误分类器』(Error Classifier)。\n"
-             "你的唯一职责是：阅读底层工具抛出的错误报文，判断它属于 5 类错误中的哪一类。\n\n"
-             "⚠️ 你不需要决定『怎么处理这个错误』——处理策略由系统代码层根据你的分类自动决定。\n"
-             "你只需要做好『语义分类』这一件事。\n\n"
-             "【关键边界澄清 - 必读】\n"
-             "business_rule_violation 与 resource_conflict 容易混淆，必须区分：\n"
-             "- **business_rule_violation**：拒绝是针对【用户身份/账户状态】的。\n"
-             "  例如：违约超限、积分不足、账户冻结、未实名。\n"
-             "  特征：换一个『资源』也救不了，因为问题出在『用户身上』。\n"
-             "- **resource_conflict**：拒绝是针对【所请求的资源】的。\n"
-             "  例如：座位已被占（SEAT_OCCUPIED）、订单已锁定、库存售罄、文档被他人编辑中。\n"
-             "  特征：换一个『资源』就能成功，问题不在用户身上。\n\n"
-             "【判断口诀】：问自己一句『换个对象重试有用吗？』\n"
-             "- 有用 → resource_conflict\n"
-             "- 没用（限制锁在用户身上） → business_rule_violation\n\n"
-             "【其他三类】\n"
-             "- invalid_params：参数本身不合法（时长越界、ID格式错），修参数就行。\n"
-             "- transient_failure：底层抖动（DB连接超时、网络波动），重试可恢复。\n"
-             "- unrecoverable：用户不存在、权限拒绝、未知错误。\n\n"
-             "【自检要点】\n"
-             "- 仔细读 error_code 字面含义。SEAT_OCCUPIED 这类带具体资源名的错误码，\n"
-             "  几乎必然是 resource_conflict 而非 business_rule。\n"
-             "- VIOLATION_LIMIT、INSUFFICIENT_POINTS 这类带用户状态名的错误码，\n"
-             "  才是 business_rule。\n"
-             "- 拿不准时，优先选 unrecoverable（保守策略，宁可误终止不可误重试）。"),
-            ("human", "用户的原始诉求: {user_intent}\n\n底层抛出的错误报文: {last_tool_msg}")
-        ])
-        structured_llm = llm.with_structured_output(ErrorClassification)
-
-        classification = await (classification_prompt | structured_llm).ainvoke({
-            "user_intent": state.get("current_user_intent", ""),
-            "last_tool_msg": error_text
-        })
-
-        strategy = REPAIR_STRATEGY_MAP.get(
-            classification.category,
-            REPAIR_STRATEGY_MAP["unrecoverable"]  # 兜底
-        )
-
-        if classification.category == "unrecoverable":
-            instruction = strategy["instruction_template"]
-        else:
-            instruction = strategy["instruction_template"].format(
-                user_summary=classification.user_facing_summary
-            )
-
-        instruction_msg = SystemMessage(content=instruction)
-        return {
-            "messages": [instruction_msg],
-            "repair_attempts": attempts + 1,
-            "trace": [{
-                "node": "error_analyzer",
-                "decision": "classified_by_llm",
-                "category": classification.category,
-                "reasoning": classification.reasoning,
-                "user_summary": classification.user_facing_summary,
-                "llm_called": True,
-            }]
-        }
+        """错误自愈节点（委托给模块级 analyze_error，llm 由闭包注入）。"""
+        return await analyze_error(state, llm)
 
 
     # ==========================================
