@@ -40,12 +40,27 @@ class _FakeLLM:
         return RunnableLambda(_return_fixed)
 
 
-def _tool_error_state(error_content: str, repair_attempts: int = 0) -> dict:
-    """构造一个最小可用的 AgentState：含一条带 [TOOL_ERROR] 的 ToolMessage。"""
+def _tool_error_state(
+    error_content: str,
+    repair_attempts: int = 0,
+    artifact: dict = None,
+) -> dict:
+    """
+    构造最小 AgentState：含一条带 [TOOL_ERROR] 的 ToolMessage。
+
+    artifact 参数（重构后新增）：
+    - 传 dict → ToolMessage 带 artifact，analyze_error 走 artifact 优先路径
+    - 不传 → 无 artifact，analyze_error 回退到正则解析 content（兼容遗留路径）
+    """
     return {
         "messages": [
             HumanMessage(content="取消订单 BKG_TEST0002"),
-            ToolMessage(content=error_content, name="cancel_booking_tool", tool_call_id="t:0"),
+            ToolMessage(
+                content=error_content,
+                name="cancel_booking_tool",
+                tool_call_id="t:0",
+                artifact=artifact,  # None 或 dict
+            ),
         ],
         "repair_attempts": repair_attempts,
         "current_user_intent": "取消订单 BKG_TEST0002",
@@ -99,6 +114,54 @@ class TestV4Shortcut:
         result = await analyze_error(state, _FakeLLM())
         assert result["repair_attempts"] == 1
 
+    @pytest.mark.asyncio
+    async def test_artifact_preferred_over_content(self):
+        """⭐ artifact 优先：有 artifact 时，category 从 artifact 读，不依赖 content 字符串。"""
+        # 故意让 content 里的字符串"撒谎"（写成 invalid_params），
+        # 但 artifact 里是真实的 unrecoverable —— 验证读的是 artifact 而非 content
+        state = _tool_error_state(
+            error_content="[TOOL_ERROR] category=invalid_params, error_code=X, message=诱饵",
+            artifact={
+                "is_error": True,
+                "category": "unrecoverable",
+                "error_code": "NOT_YOUR_BOOKING",
+                "message": "操作无法完成",
+            },
+        )
+        result = await analyze_error(state, _FakeLLM())
+
+        # 应采信 artifact 的 unrecoverable，而非 content 字符串的 invalid_params
+        assert result["trace"][0]["category"] == "unrecoverable"
+        assert result["trace"][0]["llm_called"] is False
+        # user_summary 也应来自 artifact 的 message
+        assert "操作无法完成" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_artifact_message_fills_user_summary(self):
+        """artifact 的 message 字段填充 user_summary（短路路径）。"""
+        state = _tool_error_state(
+            error_content="[TOOL_ERROR] category=resource_conflict, error_code=SEAT_OCCUPIED, message=x",
+            artifact={
+                "is_error": True,
+                "category": "resource_conflict",
+                "error_code": "SEAT_OCCUPIED",
+                "message": "座位 5 当前已被占用",
+            },
+        )
+        result = await analyze_error(state, _FakeLLM())
+        assert "座位 5 当前已被占用" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_string_fallback_when_no_artifact(self):
+        """⭐ 回退兼容：无 artifact 时（如 NO_AUTH 遗留路径），仍能正则解析 content。"""
+        state = _tool_error_state(
+            error_content="[TOOL_ERROR] category=transient_failure, error_code=DB_SYSTEM_ERROR, message=数据库抖动",
+            artifact=None,  # 显式无 artifact
+        )
+        result = await analyze_error(state, _FakeLLM())
+        # 回退到正则，仍能正确短路
+        assert result["trace"][0]["category"] == "transient_failure"
+        assert result["trace"][0]["llm_called"] is False
 
 # ==========================================
 # 组 2：熔断

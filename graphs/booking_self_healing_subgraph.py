@@ -183,22 +183,32 @@ async def analyze_error(state: AgentState, llm, max_attempts: int = MAX_REPAIR_A
     error_text = str(last_tool_msg.content)
 
     # ==========================================
-    # ⭐ V4 核心：尝试从工具消息中直接解析 category
+    # ⭐ V4 核心：提取 category（artifact 优先，正则回退）
     # ==========================================
+    # 优先从 artifact 读结构化 category（带外信道，无需解析字符串）；
+    # 读不到（旧路径/NO_AUTH 兜底）再回退到正则解析 content。
     category = None
-    match = _ERROR_CATEGORY_PATTERN.search(error_text)
-    if match:
-        candidate = match.group(1)
-        if candidate in REPAIR_STRATEGY_MAP:
-            category = candidate
+    artifact = getattr(last_tool_msg, "artifact", None)
+    if isinstance(artifact, dict) and artifact.get("category") in REPAIR_STRATEGY_MAP:
+        category = artifact["category"]
+    else:
+        match = _ERROR_CATEGORY_PATTERN.search(error_text)
+        if match:
+            candidate = match.group(1)
+            if candidate in REPAIR_STRATEGY_MAP:
+                category = candidate
 
     if category is not None:
         # ✅ 已知异常路径：跳过 LLM，直接查策略表
         strategy = REPAIR_STRATEGY_MAP[category]
         print(f"⚡ [Self-Healing V4] 异常元数据短路：category={category}（0 LLM 调用）")
 
-        msg_match = _ERROR_MESSAGE_PATTERN.search(error_text)
-        user_summary = msg_match.group(1).strip() if msg_match else "操作失败"
+        # user_summary 同样 artifact 优先
+        if isinstance(artifact, dict) and artifact.get("message"):
+            user_summary = artifact["message"]
+        else:
+            msg_match = _ERROR_MESSAGE_PATTERN.search(error_text)
+            user_summary = msg_match.group(1).strip() if msg_match else "操作失败"
 
         try:
             instruction = strategy["instruction_template"].format(user_summary=user_summary)
@@ -306,39 +316,49 @@ async def build_booking_app(llm):
     # 2. ⭐ 工具工厂：根据已认证身份动态生成工具集
     # 关键设计：student_id 从闭包捕获，LLM 完全无法看到此参数
     def make_tools_for_user(authenticated_sid: str):
-        @tool
-        async def book_seat_tool(seat_id: int, duration: int) -> str:
+        @tool(response_format="content_and_artifact")
+        async def book_seat_tool(seat_id: int, duration: int) -> tuple[str, dict]:
             """执行座位预定。系统已自动绑定您的身份，您只需提供座位号和时长。
             参数:
             - seat_id: 座位编号
             - duration: 预定时长（小时，1-8）
             """
             try:
-                # ⭐ 强制使用经过认证的 student_id，无视任何外部输入
                 data = await booking_service.book(authenticated_sid, seat_id, duration)
-                return f"✅ 预定成功！订单号: {data.get('booking_id')}"
+                return f"✅ 预定成功！订单号: {data.get('booking_id')}", {"is_error": False}
             except BookingDomainError as e:
-                # ⭐ V4: 把 category 元数据一并透传给上游 analyzer，
-                # 让其能跳过 LLM 直接走代码旁路（已知异常）
                 category_val = e.category.value if hasattr(e, 'category') else "unknown"
-                return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                artifact = {
+                    "is_error": True,
+                    "category": category_val,
+                    "error_code": e.error_code,
+                    "message": e.message,
+                }
+                content = f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                return content, artifact
 
-        @tool
-        async def search_free_seats_tool(zone_type: str = None) -> str:
-            """查询目前空闲的座位。如果用户没有指定特定区域，请不要传递此参数。"""
-            return await booking_service.search(zone_type)
+        @tool(response_format="content_and_artifact")
+        async def search_free_seats_tool(zone_type: str = None) -> tuple[str, dict]:
+            """查询目前空闲的座位。
+            参数:
+            - zone_type: 区域类型，可选值为 '静音区'、'讨论区'、'算力区'。
+                 如果用户没有指定区域，不要传递此参数。
+                 如果用户没有指定特定区域，请不要传递此参数。"""
+            result = await booking_service.search(zone_type)
+            return result, {"is_error": False}
 
-        @tool
-        async def get_my_info_tool() -> str:
+        @tool(response_format="content_and_artifact")
+        async def get_my_info_tool() -> tuple[str, dict]:
             """查询当前登录用户的积分和违约信息。系统已自动绑定您的身份。"""
-            return await booking_service.get_user_info(authenticated_sid)
+            result = await booking_service.get_user_info(authenticated_sid)
+            return result, {"is_error": False}
 
         # ==========================================
         # ⭐ CRUD 扩展工具（R / U / D）
         # ==========================================
 
-        @tool
-        async def get_my_bookings_tool() -> str:
+        @tool(response_format="content_and_artifact")
+        async def get_my_bookings_tool() -> tuple[str, dict]:
             """
             查询当前登录用户的所有订单（包括进行中和已取消的）。
             系统已自动绑定您的身份，无需提供学号。
@@ -346,21 +366,27 @@ async def build_booking_app(llm):
             try:
                 bookings = await booking_service.get_my_bookings(authenticated_sid)
                 if not bookings:
-                    return "您当前没有任何订单记录。"
-                # 把订单列表格式化成 LLM 易读的结构
+                    return "您当前没有任何订单记录。", {"is_error": False}
                 lines = [f"找到 {len(bookings)} 条订单："]
                 for b in bookings:
                     lines.append(
                         f"- 订单号: {b['booking_id']} | 座位: {b['seat_id']} | "
                         f"时长: {b['duration']}h | 状态: {b['status']}"
                     )
-                return "\n".join(lines)
+                return "\n".join(lines), {"is_error": False}
             except BookingDomainError as e:
                 category_val = e.category.value if hasattr(e, 'category') else "unknown"
-                return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                artifact = {
+                    "is_error": True,
+                    "category": category_val,
+                    "error_code": e.error_code,
+                    "message": e.message,
+                }
+                content = f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                return content, artifact
 
-        @tool
-        async def cancel_booking_tool(booking_id: str) -> str:
+        @tool(response_format="content_and_artifact")
+        async def cancel_booking_tool(booking_id: str) -> tuple[str, dict]:
             """
             取消一个订单。订单取消后座位会自动释放。
 
@@ -371,16 +397,29 @@ async def build_booking_app(llm):
             """
             try:
                 data = await booking_service.cancel_booking(authenticated_sid, booking_id)
-                return (
+                content = (
                     f"✅ 订单 {data.get('booking_id')} 已成功取消，"
                     f"座位 {data.get('seat_id')} 已释放。"
                 )
+                # 成功也返回 artifact，保持返回格式统一（is_error=False）
+                return content, {"is_error": False}
             except BookingDomainError as e:
                 category_val = e.category.value if hasattr(e, 'category') else "unknown"
-                return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                # ⭐ artifact 带外传输：category/error_code/message 走结构化信道，
+                #    LLM 只看到 content（友好文本），不接触技术元数据
+                artifact = {
+                    "is_error": True,
+                    "category": category_val,
+                    "error_code": e.error_code,
+                    "message": e.message,
+                }
+                # content 仍保留 [TOOL_ERROR] 前缀作为回退兼容（方案 A）：
+                # 即使上游读不到 artifact，旧的字符串解析路径仍能兜底
+                content = f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                return content, artifact
 
-        @tool
-        async def update_booking_duration_tool(booking_id: str, new_duration: int) -> str:
+        @tool(response_format="content_and_artifact")
+        async def update_booking_duration_tool(booking_id: str, new_duration: int) -> tuple[str, dict]:
             """
             修改订单的时长。
 
@@ -396,11 +435,19 @@ async def build_booking_app(llm):
                 )
                 return (
                     f"✅ 订单 {data.get('booking_id')} 的时长已修改为 "
-                    f"{data.get('new_duration')} 小时。"
+                    f"{data.get('new_duration')} 小时。",
+                    {"is_error": False}
                 )
             except BookingDomainError as e:
                 category_val = e.category.value if hasattr(e, 'category') else "unknown"
-                return f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                artifact = {
+                    "is_error": True,
+                    "category": category_val,
+                    "error_code": e.error_code,
+                    "message": e.message,
+                }
+                content = f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                return content, artifact
 
         return [
             book_seat_tool,
@@ -469,23 +516,28 @@ async def build_booking_app(llm):
     # ==========================================
     def check_tool_error(state: AgentState):
         """
-        嗅探器：通过特征字符串拦截异常。
+        嗅探器：判断本子图工具是否出错，决定是否转自愈。
 
-        ⭐ 拦截范围 = BOOKING_OWN_TOOLS（本子图所有工具）。
-        任何一个 booking 子图的工具抛 [TOOL_ERROR] 都要走 self-healing，
-        不能只针对 book_seat_tool——否则新增工具时会绕过自愈链路、
-        把原始错误字符串直接喂给 LLM，造成信息泄露或胡乱推理。
+        ⭐ artifact 优先：优先读 ToolMessage.artifact["is_error"]（强类型），
+           读不到再回退到 content 里的 [TOOL_ERROR] 字符串（方案 A 兼容）。
         """
         last_msg = state["messages"][-1]
 
-        # 只拦截本子图工具的输出（其他子图的 ToolMessage 不归我管）
+        # 非本子图工具不归我管
         if getattr(last_msg, "name", "") not in BOOKING_OWN_TOOLS:
             return "booking_agent"
 
-        content_str = str(last_msg.content)
+        # ⭐ 优先走 artifact 强类型判断
+        artifact = getattr(last_msg, "artifact", None)
+        if isinstance(artifact, dict):
+            if artifact.get("is_error"):
+                print(f"⚠️ [Graph 嗅探] artifact.is_error=True (tool={last_msg.name})，转 Error Analyzer...")
+                return "error_analyzer"
+            return "booking_agent"
 
-        if "[TOOL_ERROR]" in content_str:
-            print(f"⚠️ [Graph 嗅探] 捕获到业务拦截信号 (tool={last_msg.name})，转向 Error Analyzer...")
+        # 回退：旧的字符串协议（无 artifact 的遗留错误来源，如 NO_AUTH 兜底）
+        if "[TOOL_ERROR]" in str(last_msg.content):
+            print(f"⚠️ [Graph 嗅探] 字符串回退命中 (tool={last_msg.name})，转 Error Analyzer...")
             return "error_analyzer"
 
         return "booking_agent"
