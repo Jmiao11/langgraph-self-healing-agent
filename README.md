@@ -1,6 +1,6 @@
 # 梦想自习室 LangGraph Self-Healing Agent
 
-[![tests](./assets/badge.svg+xml)](https://github.com/Jmiao11/langgraph-self-healing-agent/actions/workflows/ci.yml)
+[![tests](https://github.com/Jmiao11/langgraph-self-healing-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Jmiao11/langgraph-self-healing-agent/actions/workflows/ci.yml)
 
 > 具备异常自愈与多层安全机制的智能自习室预约系统。
 
