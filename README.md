@@ -1,5 +1,7 @@
 # 梦想自习室 LangGraph Self-Healing Agent
 
+[![tests](./assets/badge.svg+xml)](https://github.com/Jmiao11/langgraph-self-healing-agent/actions/workflows/ci.yml)
+
 > 具备异常自愈与多层安全机制的智能自习室预约系统。
 
 ## 🌟 核心能力
@@ -103,12 +105,12 @@ streamlit run app.py
 
 ## ⚠️ 已知限制与边界
 
-| 限制项               | 现状                                  | 说明                                               |
-| -------------------- | ------------------------------------- | -------------------------------------------------- |
-| **数据库并发**       | SQLite + WAL，单机轻并发              | 生产场景需替换 PostgreSQL + 行锁                   |
-| **多 Provider 兜底** | LLM 池仅接入 Moonshot                 | 工厂函数已预留扩展点，未实测 GPT/Claude 切换       |
-| **测试覆盖**         | 仅有 summarize 节点单测，其余黑盒验证 | 需补充 LLM mock 框架覆盖 error_analyzer / 路由决策 |
-| **模型名配置**       | 硬编码在 `dependencies.py`            | 生产化应抽到 `.env`（已记技术债）                  |
+| 限制项               | 现状                                                         | 说明                                                         |
+| -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **数据库并发**       | SQLite + WAL，单机轻并发                                     | 生产场景需替换 PostgreSQL + 行锁                             |
+| **多 Provider 兜底** | LLM 池仅接入 Moonshot                                        | 工厂函数已预留扩展点，未实测 GPT/Claude 切换                 |
+| **测试覆盖**         | 自愈核心逻辑已覆盖（L1 纯函数 + L2 mock，31 用例），路由/子图集成层仍黑盒 | error_analyzer 已用 mock 调用计数验证 V4 短路 0 LLM 调用；集成层（含 MCP）待补 |
+| **模型名配置**       | 硬编码在 `dependencies.py`                                   | 生产化应抽到 `.env`（已记技术债）                            |
 
 > 详见 [`docs/DESIGN.md §1.4`](https://claude.ai/chat/docs/DESIGN.md)。
 
