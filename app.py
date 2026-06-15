@@ -8,6 +8,71 @@ API_BASE = "http://127.0.0.1:8000"
 # 页面基础设置
 st.set_page_config(page_title="梦想自习室 AI 馆员", page_icon="📚", layout="wide")
 
+def inject_custom_css():
+    st.markdown("""
+        <style>
+        /* ========== 1. 中文衬线字体（档案馆排版感）========== */
+        /* config 的 serif 只管英文，中文需在此显式指定字体栈 */
+        html, body, [class*="css"], .stMarkdown, .stMarkdown p,
+        h1, h2, h3, .stButton button, .stRadio label {
+            font-family: "Noto Serif SC", "Source Han Serif SC",
+                         "Songti SC", "SimSun", "STSong", serif !important;
+        }
+
+        /* ========== 2. 内容区入场淡入 ========== */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .block-container {
+            animation: fadeIn 0.6s ease-out forwards;
+            padding-top: 3rem;
+        }
+
+        /* 透明化顶部 header，去掉机房感的横条 */
+        .stApp > header { background-color: transparent !important; }
+
+        /* ========== 3. 卡片材质：单像素边框 + 纸面阴影 + 悬浮抬起 ========== */
+        /* 同时兼容新旧版 Streamlit 的 metric / expander testid */
+        div[data-testid="stMetric"],
+        div[data-testid="metric-container"],
+        div[data-testid="stExpander"] {
+            background-color: #FFFEFB;
+            border: 1px solid #DED7C6;
+            border-radius: 8px;
+            padding: 16px;
+            box-shadow: 0 1px 3px rgba(80, 60, 30, 0.04);
+            transition: transform 0.25s ease, box-shadow 0.25s ease;
+        }
+        div[data-testid="stMetric"]:hover,
+        div[data-testid="metric-container"]:hover,
+        div[data-testid="stExpander"]:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 14px rgba(80, 60, 30, 0.08);
+        }
+
+        /* ========== 4. 按钮：复古红描边风，悬浮填充 ========== */
+        .stButton button {
+            border: 1px solid #C9B99B !important;
+            border-radius: 6px !important;
+            transition: all 0.25s ease !important;
+        }
+        .stButton button:hover {
+            border-color: #7F1D1D !important;
+            color: #7F1D1D !important;
+        }
+
+        /* ========== 5. 隐藏 Deploy 按钮和默认菜单，更干净 ========== */
+        .stDeployButton { display: none; }
+        #MainMenu { visibility: hidden; }
+        </style>
+    """, unsafe_allow_html=True)
+
+
+# 紧跟 set_page_config 之后调用
+inject_custom_css()
+
+
 # --- 初始化状态 ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -80,6 +145,60 @@ def render_my_bookings_sidebar():
         )
 
 
+def render_my_bookings_page():
+    """我的订单独立视图：汇总统计 + 订单卡片列表。"""
+    st.title("📋 我的订单")
+
+    bookings = fetch_my_bookings()
+    if bookings is None:
+        st.warning("订单数据加载失败，请检查后端服务")
+        return
+    if not bookings:
+        st.info("您当前还没有任何订单。去「AI 馆员」预约一个座位吧。")
+        return
+
+    # --- 顶部汇总 ---
+    total = len(bookings)
+    active = sum(1 for b in bookings if b["status"] == "LOCKED")
+    cancelled = sum(1 for b in bookings if b["status"] == "CANCELLED")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("订单总数", total)
+    c2.metric("进行中", active)
+    c3.metric("已取消", cancelled)
+
+    st.divider()
+
+    # --- 订单卡片列表（CSS 卡片，融入档案馆主题）---
+    STATUS_BADGE = {
+        "LOCKED": ("进行中", "#5C7A52", "#FFFEFB"),       # 墨绿
+        "CANCELLED": ("已取消", "#8A7B5E", "#EDE7D8"),    # 灰褐沉底
+    }
+
+    parts = ['<div style="display:flex;flex-direction:column;gap:12px;">']
+    for b in bookings:
+        label, accent, bg = STATUS_BADGE.get(
+            b["status"], (b["status"], "#8A7B5E", "#EDE7D8")
+        )
+        zone = b.get("zone_type") or "未知区域"
+        parts.append(
+            f'<div style="background:{bg};border:1px solid #DED7C6;'
+            f'border-left:4px solid {accent};border-radius:8px;padding:14px 18px;'
+            f'box-shadow:0 1px 2px rgba(80,60,30,0.05);'
+            f'display:flex;justify-content:space-between;align-items:center;">'
+            f'<div>'
+            f'<div style="font-weight:700;font-size:16px;color:#2B2622;'
+            f'font-family:\'Songti SC\',\'SimSun\',serif;">{b["booking_id"]}</div>'
+            f'<div style="font-size:13px;color:#6B5D45;margin-top:4px;">'
+            f'📍 {zone} · 座位 {b["seat_id"]} · {b["duration"]}h</div>'
+            f'</div>'
+            f'<div style="color:{accent};font-weight:600;font-size:14px;'
+            f'white-space:nowrap;">{label}</div>'
+            f'</div>'
+        )
+    parts.append('</div>')
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
 def _render_seat_zones(seats, expanded_in_page=False):
     """共享的座位网格渲染（按区域分组 + CSS Grid）。
     expanded_in_page=True 时直接铺在页面上，不套 expander。"""
@@ -87,12 +206,15 @@ def _render_seat_zones(seats, expanded_in_page=False):
     for s in seats:
         zones.setdefault(s["zone_type"], []).append(s)
 
-    st.caption("🟦 我的座位 ｜ 🟩 空闲 ｜ ⬛ 已占用（他人）")
+    st.caption("🟥 我的座位 ｜ 🟩 空闲 ｜ ⬜ 已占用（他人）")
 
-    parts = ['<div style="display:flex;flex-direction:column;gap:14px;">']
+    # ⭐ 档案馆配色：纸面卡片 + 复古红/墨绿/灰褐，替换原深色机房配色
+    parts = ['<div style="display:flex;flex-direction:column;gap:16px;">']
     for zone_name, zone_seats in zones.items():
         parts.append(
-            f'<div style="font-weight:600;color:#c9d1d9;font-size:15px;">{zone_name}</div>'
+            f'<div style="font-weight:600;color:#5C4A32;font-size:15px;'
+            f'font-family:\'Songti SC\',\'SimSun\',serif;'
+            f'border-left:3px solid #7F1D1D;padding-left:8px;">{zone_name}</div>'
         )
         parts.append(
             '<div style="display:grid;'
@@ -100,21 +222,27 @@ def _render_seat_zones(seats, expanded_in_page=False):
         )
         for s in zone_seats:
             if s["is_mine"]:
-                bg, border, color, tag = "#1f6feb", "#1f6feb", "#ffffff", "我的"
+                # 我的座位：复古红实底，最醒目
+                bg, border, color, tag = "#7F1D1D", "#7F1D1D", "#F5F1E8", "我的"
             elif s["status"] == "FREE":
-                bg, border, color, tag = "#0d1117", "#2ea043", "#7ee787", "空闲"
+                # 空闲：纸白底 + 墨绿描边
+                bg, border, color, tag = "#FFFEFB", "#5C7A52", "#3D5235", "空闲"
             else:
-                bg, border, color, tag = "#161b22", "#6e7681", "#8b949e", "已占"
+                # 他人占用：暗米底 + 灰褐描边，沉下去
+                bg, border, color, tag = "#EDE7D8", "#B8AC92", "#8A7B5E", "已占"
             parts.append(
                 f'<div style="background:{bg};border:1px solid {border};'
-                f'border-radius:8px;padding:10px 6px;text-align:center;color:{color};">'
-                f'<div style="font-size:18px;font-weight:700;line-height:1.3;">{s["seat_id"]}</div>'
-                f'<div style="font-size:12px;opacity:0.85;">{tag}</div>'
+                f'border-radius:8px;padding:10px 6px;text-align:center;color:{color};'
+                f'box-shadow:0 1px 2px rgba(80,60,30,0.05);">'
+                f'<div style="font-size:18px;font-weight:700;line-height:1.3;'
+                f'font-family:\'Songti SC\',\'SimSun\',serif;">{s["seat_id"]}</div>'
+                f'<div style="font-size:12px;opacity:0.9;">{tag}</div>'
                 f'</div>'
             )
         parts.append('</div>')
     parts.append('</div>')
     st.markdown("".join(parts), unsafe_allow_html=True)
+
 
 def render_seat_grid():
     """主区顶部：实时座位网格，CSS Grid 渲染，自己的座位高亮。"""
@@ -239,7 +367,7 @@ else:
         # ⭐ 视图导航：聊天 / 座位面板
         view = st.radio(
             "导航",
-            ["💬 AI 馆员", "🪑 座位面板"],
+            ["💬 AI 馆员", "🪑 座位面板", "📋 我的订单"],
             label_visibility="collapsed",
         )
 
@@ -251,21 +379,15 @@ else:
             st.session_state.token = None
             st.rerun()
 
-        # 聊天视图下，侧边栏保留「我的订单」摘要；
-        # 座位面板视图下不重复展示（面板里有完整数据）
-        if view == "💬 AI 馆员":
-            render_my_bookings_sidebar()
 
-    # ==========================================
-    # 视图 A：座位面板（独立页）
-    # ==========================================
     if view == "🪑 座位面板":
         render_seat_panel_page()
 
-    # ==========================================
-    # 视图 B：AI 馆员聊天
-    # ==========================================
+    elif view == "📋 我的订单":
+        render_my_bookings_page()
+
     else:
+        # AI 馆员聊天（原样不动）
         st.title("📚 AI 馆员在线中")
 
         # 渲染历史

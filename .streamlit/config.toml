@@ -1,0 +1,22 @@
+[theme]
+# 强制浅色模式——档案馆基调，关掉机房深色
+base = "light"
+
+# 主背景：纸张质感的暖奶油色
+backgroundColor = "#FDFBF7"
+
+# 侧边栏 / 次级容器背景：稍深的米色，拉开层级
+secondaryBackgroundColor = "#F4F0E6"
+
+# 全局文字：老墨水的深炭灰（比纯黑柔和，护眼且有年代感）
+textColor = "#2B2622"
+
+# 强调色：低饱和复古红（按钮、激活态、链接）
+primaryColor = "#7F1D1D"
+
+# 英文衬线兜底（中文衬线在第二步用 CSS 显式指定，config 的 serif 管不到中文）
+font = "serif"
+
+[server]
+# 关掉 Streamlit 的使用统计收集（可选，无关紧要，顺手加）
+gatherUsageStats = false
