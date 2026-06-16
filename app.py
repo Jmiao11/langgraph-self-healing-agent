@@ -83,7 +83,7 @@ if "user_name" not in st.session_state:
 if "token" not in st.session_state:
     st.session_state.token = None
 if "thread_id" not in st.session_state:
-    st.session_state.thread_id = str(uuid.uuid4())
+    st.session_state.thread_id = None  # ⭐ 新会话不预生成 id；后端 mint 后返回
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -115,6 +115,33 @@ def fetch_my_bookings():
     except requests.exceptions.RequestException:
         pass
     return None
+
+
+def fetch_sessions():
+    """拉取当前用户的会话列表（按最近活跃倒序）。失败返回空列表。"""
+    try:
+        res = requests.get(f"{API_BASE}/api/sessions", headers=_auth_headers(), timeout=5)
+        if res.status_code == 200:
+            return res.json().get("data", [])
+    except requests.exceptions.RequestException:
+        pass
+    return []
+
+
+def fetch_history(thread_id):
+    """拉取某条会话的可展示历史。失败/非归属（404）返回空列表。"""
+    try:
+        res = requests.get(
+            f"{API_BASE}/api/history",
+            params={"thread_id": thread_id},
+            headers=_auth_headers(),
+            timeout=5,
+        )
+        if res.status_code == 200:
+            return res.json().get("data", [])
+    except requests.exceptions.RequestException:
+        pass
+    return []
 
 
 # ==========================================
@@ -326,6 +353,40 @@ def render_seat_panel_page():
     _render_seat_zones(seats, expanded_in_page=True)
 
 
+def render_session_list():
+    """侧栏会话面板：新建 + 历史会话列表（点击切换）。仅在 AI 馆员视图调用。"""
+    st.divider()
+    st.caption("会话")
+
+    # 新建会话：生成新 thread_id + 清空本地消息
+    if st.button("➕ 新建会话", use_container_width=True):
+        st.session_state.thread_id = None  # ⭐ 交给后端 mint
+        st.session_state.messages = []
+        st.rerun()
+
+    sessions = fetch_sessions()
+    if not sessions:
+        st.caption("暂无历史会话")
+        return
+
+    for s in sessions:
+        tid = s["thread_id"]
+        title = (s.get("title") or "").strip() or "未命名会话"
+        label = title if len(title) <= 18 else title[:18] + "…"
+        is_active = (tid == st.session_state.thread_id)
+        # 当前会话：▶ 前缀 + 禁用（视觉标记、防重复点击）
+        if st.button(
+            ("▶ " if is_active else "") + label,
+            key=f"sess_{tid}",
+            use_container_width=True,
+            disabled=is_active,
+        ):
+            # 切换会话：设 thread_id + 拉历史回填气泡
+            st.session_state.thread_id = tid
+            st.session_state.messages = fetch_history(tid)
+            st.rerun()
+
+
 # ==========================================
 # 1. 登录逻辑（不动）
 # ==========================================
@@ -371,6 +432,11 @@ else:
             label_visibility="collapsed",
         )
 
+        # ⭐ 会话列表：仅在 AI 馆员视图显示
+        if view == "💬 AI 馆员":
+            render_session_list()
+
+        st.divider()
         if st.button("🔄 刷新数据", use_container_width=True):
             st.rerun()
         if st.button("退出登录", use_container_width=True):
@@ -417,7 +483,10 @@ else:
                             headers=_auth_headers()
                         )
                         if res.status_code == 200:
-                            ans = res.json().get("response")
+                            data = res.json()
+                            ans = data.get("response")
+                            # ⭐ 捕获服务端 mint 的 thread_id（新会话首条消息后）
+                            st.session_state.thread_id = data.get("thread_id", st.session_state.thread_id)
                             st.markdown(ans)
                             st.session_state.messages.append({"role": "assistant", "content": ans})
                             # 对话可能改变座位/订单 → rerun 让侧边栏订单刷新

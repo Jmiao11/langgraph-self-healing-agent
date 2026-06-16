@@ -58,7 +58,7 @@ app = FastAPI(title="梦想自习室 API V2", lifespan=lifespan)
 
 # --- 数据模型 ---
 class ChatRequest(BaseModel):
-    thread_id: str = None
+    thread_id: str | None = None   # ⭐ 可空：新会话显式传 null，后端 mint
     message: str
     student_id: str  # 新增：从前端传来的已认证学号
     user_name: str   # 新增：从前端传来的用户名
