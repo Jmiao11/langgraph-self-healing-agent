@@ -14,7 +14,7 @@ from infrastructure.dependencies import (
     init_memory_checkpointer, init_vector_store, init_bm25_retriever, init_llm_pool
 )
 from services.retrieval_service import RetrievalService
-from services.session_registry import SessionRegistry
+from services.session_registry import SessionRegistry, register_chat_turn
 from utils.message_filters import build_history_view_or_none
 
 from utils.auth import generate_token, verify_token
@@ -95,6 +95,20 @@ async def chat_endpoint(req: ChatRequest, authorization: str = Header(None)):
 
     thread_id = req.thread_id if req.thread_id else str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
+
+    # ⭐ Step 2.5: 会话登记（写 registry）
+    # 方案(A)：进 chat 即登记，幂等兜底。会话记录的存在性对应
+    # "用户发起过这轮"，而非"LLM 成功回答了"——哪怕本轮失败，
+    # 会话也应出现在列表供用户重试/查看。
+    # 越权防御：thread_id 非空但不属于当前用户 → 静默拒绝（404）。
+    is_new_session = not req.thread_id
+    session_title = (req.message or "").strip()[:30]
+    ok = register_chat_turn(
+        session_registry, trusted_sid, thread_id,
+        is_new=is_new_session, title=session_title,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="会话不存在")
 
     identity_prompt = (
         f"【系统底层强制安全指令】\n"

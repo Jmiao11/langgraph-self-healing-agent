@@ -192,3 +192,37 @@ class SessionRegistry:
                 (thread_id, user_id),
             ).fetchone()
         return row is not None
+
+
+# ==========================================
+# ⭐ chat 轮次登记编排（纯函数，便于单测写路径的越权决策）
+# ==========================================
+def register_chat_turn(
+    registry,
+    user_id: str,
+    thread_id: str,
+    is_new: bool,
+    title: str = "",
+    now: str | None = None,
+) -> bool:
+    """登记本轮对话到 registry。供 /api/chat 在驱动图之前调用。
+
+    决策逻辑（写路径的安全核心）：
+      - is_new=True  → 新会话，create_session（幂等）
+      - is_new=False → 老会话，必须 verify_owner 通过才 touch；
+                       不通过 → 返回 False（越权：thread_id 非空但不属于该用户）
+
+    ⭐ 越权防御：阻止有人借 /api/chat 往他人 thread 里灌消息，
+       也堵死"绕过 /api/history 归属校验"的旁路。registry 为鸭子类型，
+       仅需 create_session / verify_owner / touch，便于用假对象单测。
+
+    Returns:
+        True 正常放行；False 表示越权，调用方应静默拒绝（404）。
+    """
+    if is_new:
+        registry.create_session(user_id, thread_id, title=title, now=now)
+        return True
+    if not registry.verify_owner(user_id, thread_id):
+        return False
+    registry.touch(user_id, thread_id, now=now)
+    return True

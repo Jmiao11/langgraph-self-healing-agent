@@ -135,3 +135,39 @@ class TestSchemaIdempotent:
         # 第二次实例化会再跑一遍 _init_schema —— 必须幂等
         r2 = SessionRegistry(path)
         assert r2.verify_owner("stu_A", "tid-1") is True
+
+
+# ==========================================
+# 5. register_chat_turn：写路径越权决策
+# ==========================================
+from services.session_registry import register_chat_turn
+
+
+class TestRegisterChatTurn:
+
+    def test_new_session_creates(self, registry):
+        ok = register_chat_turn(registry, "stu_A", "tid-1", is_new=True, title="订座位")
+        assert ok is True
+        assert registry.verify_owner("stu_A", "tid-1") is True
+        assert registry.get_session("stu_A", "tid-1")["title"] == "订座位"
+
+    def test_owner_old_session_touches(self, registry):
+        registry.create_session("stu_A", "tid-1", now="2024-01-01T00:00:00+00:00")
+        ok = register_chat_turn(
+            registry, "stu_A", "tid-1", is_new=False, now="2024-02-01T00:00:00+00:00"
+        )
+        assert ok is True
+        s = registry.get_session("stu_A", "tid-1")
+        assert s["updated_at"] == "2024-02-01T00:00:00+00:00"  # touch 生效
+
+    def test_non_owner_old_session_rejected(self, registry):
+        """⭐ B 拿 A 的 thread_id 走 chat → 越权拒绝，且不产生任何副作用。"""
+        registry.create_session("stu_A", "tid-1", now="2024-01-01T00:00:00+00:00")
+        ok = register_chat_turn(
+            registry, "stu_B", "tid-1", is_new=False, now="2099-01-01T00:00:00+00:00"
+        )
+        assert ok is False
+        # A 的记录没被 touch（updated_at 未变）
+        assert registry.get_session("stu_A", "tid-1")["updated_at"] == "2024-01-01T00:00:00+00:00"
+        # B 没有凭空获得这条会话
+        assert registry.list_sessions("stu_B") == []
