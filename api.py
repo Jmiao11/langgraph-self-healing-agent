@@ -14,16 +14,19 @@ from infrastructure.dependencies import (
     init_memory_checkpointer, init_vector_store, init_bm25_retriever, init_llm_pool
 )
 from services.retrieval_service import RetrievalService
+from services.session_registry import SessionRegistry
+from utils.message_filters import build_history_view_or_none
 
 from utils.auth import generate_token, verify_token
 from fastapi import Header, Depends
 
 router_app = None
+session_registry: SessionRegistry = None  # ⭐ 会话注册表（lifespan 中实例化）
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global router_app
+    global router_app, session_registry
     print("🚀 [API Server] 正在启动底层 LangGraph 引擎...")
 
     # 初始化基础设施
@@ -38,6 +41,13 @@ async def lifespan(app: FastAPI):
 
     # 编译图
     router_app = await create_router_app(checkpointer, retrieval_service, llm_pool)
+
+    # ⭐ 会话注册表：与 checkpointer 同属"会话基础设施"，存独立的 sessions.db
+    # （checkpointer 存图状态 / registry 存"用户→会话"元数据，职责分离）
+    sessions_db_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "memory", "sessions.db"
+    )
+    session_registry = SessionRegistry(sessions_db_path)
 
     print("✅ [API Server] 引擎就绪！")
     yield
@@ -228,6 +238,57 @@ async def get_my_bookings_endpoint(student_id: str = Depends(get_authenticated_s
         raise HTTPException(status_code=500, detail="订单数据查询失败")
     finally:
         conn.close()
+
+
+# ==========================================
+# ⭐ 会话管理只读端点（Session Management — 读路径）
+# ==========================================
+# 设计纪律：
+#   - 这两个端点只读，绝不写库；写入 registry 的时机在 /api/chat（Step 3）
+#   - student_id 一律取自 token（复用 get_authenticated_sid），无视前端传值
+#   - /api/history 必须先过归属闸门再取数：非归属者 404 静默拒绝，
+#     与订单越权防护（NotYourBookingError 静默拒绝）同源
+
+
+@app.get("/api/sessions")
+async def list_sessions_endpoint(student_id: str = Depends(get_authenticated_sid)):
+    """列举当前用户的全部会话，按最近活跃倒序。供前端渲染会话列表侧栏。"""
+    try:
+        sessions = session_registry.list_sessions(student_id)
+        return {"success": True, "data": sessions}
+    except Exception as e:
+        print(f"❌ [/api/sessions] 查询异常: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="会话列表查询失败")
+
+
+@app.get("/api/history")
+async def get_history_endpoint(
+    thread_id: str,
+    student_id: str = Depends(get_authenticated_sid),
+):
+    """载入某条会话的可展示历史消息。
+
+    ⭐ 安全：先过归属闸门（verify_owner）再调 aget_state 取状态。
+       非归属 / 不存在 一律 404——两者无法区分，杜绝借 thread_id 探测他人会话。
+    """
+    try:
+        snapshot = await router_app.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        snapshot_values = snapshot.values if snapshot else None
+    except Exception as e:
+        print(f"❌ [/api/history] 取状态异常: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="会话历史读取失败")
+
+    # 归属闸门 + 展示过滤（纯函数，已单测覆盖）
+    view = build_history_view_or_none(
+        session_registry, snapshot_values, student_id, thread_id
+    )
+    if view is None:
+        # 静默拒绝：不区分“不属于你”与“不存在”
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    return {"success": True, "thread_id": thread_id, "data": view}
 
 
 def verify_user_from_db(student_id: str, password: str):

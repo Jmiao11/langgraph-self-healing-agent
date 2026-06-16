@@ -217,28 +217,3 @@ def build_display_view(messages: list[BaseMessage]) -> list[dict]:
                 view.append({"role": "assistant", "content": text})
         # 其余（System / Tool / 纯 tool_calls AIMessage）静默跳过
     return view
-
-
-def build_history_view_or_none(
-    registry,
-    snapshot_values: dict | None,
-    user_id: str,
-    thread_id: str,
-) -> list[dict] | None:
-    """归属校验通过则返回展示视图，否则返回 None（端点据此 404 静默拒绝）。
-
-    ⭐ 短路顺序：先 verify_owner，不过则立刻 None——绝不在归属不成立时去读、
-       去过滤消息内容。这保证非归属者拿不到任何消息片段。
-
-    Args:
-        registry: 需提供 verify_owner(user_id, thread_id) -> bool（鸭子类型）
-        snapshot_values: aget_state(...).values，可能为 None 或缺 messages 键
-        user_id / thread_id: 当前认证用户 与 目标会话
-
-    Returns:
-        list[dict] 展示视图（可空列表）；或 None 表示归属校验未过。
-    """
-    if not registry.verify_owner(user_id, thread_id):
-        return None
-    messages = (snapshot_values or {}).get("messages", [])
-    return build_display_view(messages)
