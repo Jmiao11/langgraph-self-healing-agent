@@ -130,6 +130,29 @@ class ErrorClassification(BaseModel):
 
 
 # ==========================================
+# ⭐ 单一判据：一条 ToolMessage 是否为错误
+# ==========================================
+def _tool_message_is_error(m) -> bool:
+    """判断一条消息是否为「出错的 ToolMessage」。
+
+    ⭐ 单一判据（artifact 优先，content 字符串回退）——嗅探器 check_tool_error
+       与自愈定位 analyze_error 共用此函数，杜绝“两处判据不一致”的隐患：
+       即嗅探器凭 artifact.is_error 认定是错、转去自愈，自愈却凭 content 里的
+       [TOOL_ERROR] 字符串找不到它（content 一旦清理为纯友好文本就会发生）。
+
+    判据：
+      - 有 artifact(dict) → 以 artifact["is_error"] 为准（强类型，与重构后协议一致）
+      - 无 artifact → 回退到 content 里的 [TOOL_ERROR] 字符串（兼容 NO_AUTH 等遗留路径）
+    """
+    if not isinstance(m, ToolMessage):
+        return False
+    artifact = getattr(m, "artifact", None)
+    if isinstance(artifact, dict):
+        return bool(artifact.get("is_error"))
+    return "[TOOL_ERROR]" in str(m.content)
+
+
+# ==========================================
 # ⭐ 自愈决策核心逻辑（从闭包中抽出，便于单元测试）
 # ==========================================
 # 设计动机：原 error_analyzer_node 定义在 build_booking_app 闭包内，
@@ -170,7 +193,7 @@ async def analyze_error(state: AgentState, llm, max_attempts: int = MAX_REPAIR_A
     # === 找到最近一条带 [TOOL_ERROR] 的 ToolMessage ===
     last_tool_msg = None
     for m in reversed(state["messages"]):
-        if isinstance(m, ToolMessage) and "[TOOL_ERROR]" in str(m.content):
+        if _tool_message_is_error(m):   # ⭐ 与嗅探器同判据（artifact 优先）
             last_tool_msg = m
             break
 
@@ -527,17 +550,10 @@ async def build_booking_app(llm):
         if getattr(last_msg, "name", "") not in BOOKING_OWN_TOOLS:
             return "booking_agent"
 
-        # ⭐ 优先走 artifact 强类型判断
-        artifact = getattr(last_msg, "artifact", None)
-        if isinstance(artifact, dict):
-            if artifact.get("is_error"):
-                print(f"⚠️ [Graph 嗅探] artifact.is_error=True (tool={last_msg.name})，转 Error Analyzer...")
-                return "error_analyzer"
-            return "booking_agent"
-
-        # 回退：旧的字符串协议（无 artifact 的遗留错误来源，如 NO_AUTH 兜底）
-        if "[TOOL_ERROR]" in str(last_msg.content):
-            print(f"⚠️ [Graph 嗅探] 字符串回退命中 (tool={last_msg.name})，转 Error Analyzer...")
+        # ⭐ 单一判据：与 analyze_error 定位共用 _tool_message_is_error
+        #    （artifact 优先，content 回退）——两处同一函数，物理上不可能不一致
+        if _tool_message_is_error(last_msg):
+            print(f"⚠️ [Graph 嗅探] 工具错误 (tool={last_msg.name})，转 Error Analyzer...")
             return "error_analyzer"
 
         return "booking_agent"
