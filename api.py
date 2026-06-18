@@ -16,6 +16,7 @@ from infrastructure.dependencies import (
 from services.retrieval_service import RetrievalService
 from services.session_registry import SessionRegistry, register_chat_turn
 from utils.message_filters import build_history_view_or_none
+from utils.healing_trace import summarize_self_healing_trace
 
 from utils.auth import generate_token, verify_token
 from fastapi import Header, Depends
@@ -58,7 +59,7 @@ app = FastAPI(title="梦想自习室 API V2", lifespan=lifespan)
 
 # --- 数据模型 ---
 class ChatRequest(BaseModel):
-    thread_id: str | None = None   # ⭐ 可空：新会话显式传 null，后端 mint
+    thread_id: str | None = None  # ⭐ 可空：新会话显式传 null，后端 mint
     message: str
     student_id: str  # 新增：从前端传来的已认证学号
     user_name: str   # 新增：从前端传来的用户名
@@ -67,6 +68,7 @@ class ChatResponse(BaseModel):
     thread_id: str
     response: str
     status: str = "success"
+    healing: dict = {}  # ⭐ 本轮自愈轨迹摘要（空字典=未发生自愈）
 
 
 # --- 核心接口 ---
@@ -96,9 +98,11 @@ async def chat_endpoint(req: ChatRequest, authorization: str = Header(None)):
     thread_id = req.thread_id if req.thread_id else str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
+    # ==========================================
     # ⭐ Step 2.5: 会话登记（写 registry）
+    # ==========================================
     # 方案(A)：进 chat 即登记，幂等兜底。会话记录的存在性对应
-    # "用户发起过这轮"，而非"LLM 成功回答了"——哪怕本轮失败，
+    # “用户发起过这轮”，而非“LLM 成功回答了”——哪怕本轮失败，
     # 会话也应出现在列表供用户重试/查看。
     # 越权防御：thread_id 非空但不属于当前用户 → 静默拒绝（404）。
     is_new_session = not req.thread_id
@@ -148,9 +152,20 @@ async def chat_endpoint(req: ChatRequest, authorization: str = Header(None)):
         print(f"❌ 系统异常: {str(e)}", file=sys.stderr)
         raise HTTPException(status_code=500, detail="服务器内部错误，请联系系统管理员")
 
+    # ⭐ 读取本轮自愈轨迹：trace 每轮清零，aget_state 取到的就是这一轮。
+    # 包在 try 里：轨迹读取失败绝不影响主响应（面板是锦上添花，回答是命脉）。
+    healing = {}
+    try:
+        snapshot = await router_app.aget_state(config)
+        trace = snapshot.values.get("trace", []) if snapshot else []
+        healing = summarize_self_healing_trace(trace)
+    except Exception as e:
+        print(f"⚠️ [/api/chat] 读取自愈轨迹失败（不影响主响应）: {e}", file=sys.stderr)
+
     return ChatResponse(
         thread_id=thread_id,
-        response=final_text
+        response=final_text,
+        healing=healing,
     )
 
 
