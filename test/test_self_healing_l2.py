@@ -253,3 +253,74 @@ class TestLLMFallback:
         assert "search_free_seats_tool" in result["messages"][0].content
         # user_summary 被填进模板
         assert "您选的座位暂时不可用" in result["messages"][0].content
+
+# ==========================================
+# 组 5：错误定位——单一判据（A1 技术债修复）
+# ==========================================
+# 验证 analyze_error 定位错误消息时与嗅探器同判据（artifact 优先）。
+# 核心回归：content 一旦清理为纯友好文本（无 [TOOL_ERROR]），
+# 只要 artifact.is_error=True，自愈仍能定位到错误消息——不再静默失效。
+from graphs.booking_self_healing_subgraph import _tool_message_is_error
+from langchain_core.messages import AIMessage
+
+
+class TestErrorLocation:
+
+    @pytest.mark.asyncio
+    async def test_locates_via_artifact_when_content_clean(self):
+        """⭐ content 无 [TOOL_ERROR]（纯友好文本）但 artifact.is_error=True
+        → 仍能定位 + 走 artifact 短路，0 LLM。修复前此场景会 no_error_found。"""
+        state = _tool_error_state(
+            error_content="抱歉，该座位当前已被占用。",  # 纯友好文本，无 [TOOL_ERROR]
+            artifact={"is_error": True, "category": "resource_conflict",
+                      "message": "座位已被占用"},
+        )
+        fake_llm = _FakeLLM()
+        result = await analyze_error(state, fake_llm)
+
+        # 没有退化为 no_error_found
+        decisions = [t.get("decision") for t in result.get("trace", [])]
+        assert "no_error_found" not in decisions
+        # 走了 artifact 短路，0 LLM
+        assert "shortcut_via_metadata" in decisions
+        assert fake_llm.structured_output_call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_clean_content_no_artifact_is_not_found(self):
+        """纯友好文本 + 无 artifact → 不视为错误（既不该误判，也证明回退判据生效）。"""
+        state = _tool_error_state(
+            error_content="抱歉，该座位当前已被占用。",  # 无标记
+            artifact=None,                                # 无 artifact
+        )
+        fake_llm = _FakeLLM()
+        result = await analyze_error(state, fake_llm)
+        decisions = [t.get("decision") for t in result.get("trace", [])]
+        assert decisions == ["no_error_found"]
+        assert fake_llm.structured_output_call_count == 0
+
+
+class TestToolMessageIsErrorJudge:
+    """单一判据函数本身的单元覆盖。"""
+
+    def test_artifact_is_error_true(self):
+        m = ToolMessage(content="友好文本", name="book_seat_tool",
+                        tool_call_id="t:0", artifact={"is_error": True})
+        assert _tool_message_is_error(m) is True
+
+    def test_artifact_is_error_false_overrides_content(self):
+        """⭐ artifact 优先：即使 content 含 [TOOL_ERROR]，artifact.is_error=False 也判为非错。"""
+        m = ToolMessage(content="[TOOL_ERROR] 误带前缀", name="book_seat_tool",
+                        tool_call_id="t:0", artifact={"is_error": False})
+        assert _tool_message_is_error(m) is False
+
+    def test_content_fallback_when_no_artifact(self):
+        m = ToolMessage(content="[TOOL_ERROR] error_code=NO_AUTH", name="x",
+                        tool_call_id="t:0", artifact=None)
+        assert _tool_message_is_error(m) is True
+
+    def test_clean_content_no_artifact_false(self):
+        m = ToolMessage(content="一切正常", name="x", tool_call_id="t:0", artifact=None)
+        assert _tool_message_is_error(m) is False
+
+    def test_non_tool_message_false(self):
+        assert _tool_message_is_error(AIMessage(content="hi")) is False
