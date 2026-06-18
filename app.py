@@ -387,6 +387,36 @@ def render_session_list():
             st.rerun()
 
 
+def render_activity_panel(activity):
+    """在助手气泡下渲染「执行轨迹」可展开面板。仅当本轮有工具调用/自愈时显示。
+    activity 为 /api/chat 返回的 summarize_execution_trace 结果。"""
+    if not activity or not activity.get("has_activity"):
+        return
+    tool_calls = activity.get("tool_call_count", 0)
+    shortcut = activity.get("shortcut_count", 0)
+    llm_calls = activity.get("llm_classify_calls", 0)
+    circuit = activity.get("circuit_broken", False)
+    healing = activity.get("healing_triggered", False)
+    steps = activity.get("steps", [])
+
+    # headline：基础显工具调用次数；发生自愈时突出最亮的指标（0 LLM 短路）
+    headline = f"🛠 执行轨迹 · {tool_calls} 次工具调用"
+    if healing:
+        if shortcut and not llm_calls:
+            headline += f" · ⚡ {shortcut} 次确定性短路（0 LLM）"
+        elif llm_calls:
+            headline += f" · 🧠 {llm_calls} 次 LLM 降级分类"
+    if circuit:
+        headline += " · 🔥 已熔断"
+
+    with st.expander(headline, expanded=True):
+        for step in steps:
+            st.markdown(f"{step.get('icon','')} **{step.get('title','')}**")
+            detail = step.get("detail")
+            if detail:
+                st.caption(detail)
+
+
 # ==========================================
 # 1. 登录逻辑（不动）
 # ==========================================
@@ -460,6 +490,9 @@ else:
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+                # ⭐ 助手消息若带执行轨迹，挂面板（历史回填的消息无 activity，不显示）
+                if msg["role"] == "assistant" and msg.get("activity"):
+                    render_activity_panel(msg["activity"])
 
         # ⭐ chat_input 必须在页面顶层（不进 expander/columns/tabs），
         #    用 if 条件渲染而非容器包裹，规避底部钉死坑
@@ -488,7 +521,10 @@ else:
                             # ⭐ 捕获服务端 mint 的 thread_id（新会话首条消息后）
                             st.session_state.thread_id = data.get("thread_id", st.session_state.thread_id)
                             st.markdown(ans)
-                            st.session_state.messages.append({"role": "assistant", "content": ans})
+                            # ⭐ 本轮执行轨迹：即时渲染 + 随消息持久化（跨 rerun）
+                            activity = data.get("activity", {})
+                            render_activity_panel(activity)
+                            st.session_state.messages.append({"role": "assistant", "content": ans, "activity": activity})
                             # 对话可能改变座位/订单 → rerun 让侧边栏订单刷新
                             st.rerun()
                         else:

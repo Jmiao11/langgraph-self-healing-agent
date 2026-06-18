@@ -16,7 +16,7 @@ from infrastructure.dependencies import (
 from services.retrieval_service import RetrievalService
 from services.session_registry import SessionRegistry, register_chat_turn
 from utils.message_filters import build_history_view_or_none
-from utils.healing_trace import summarize_self_healing_trace
+from utils.execution_trace import summarize_execution_trace
 
 from utils.auth import generate_token, verify_token
 from fastapi import Header, Depends
@@ -68,7 +68,7 @@ class ChatResponse(BaseModel):
     thread_id: str
     response: str
     status: str = "success"
-    healing: dict = {}  # ⭐ 本轮自愈轨迹摘要（空字典=未发生自愈）
+    activity: dict = {}  # ⭐ 本轮执行轨迹摘要（工具调用 + 自愈；空字典=无活动）
 
 
 # --- 核心接口 ---
@@ -154,18 +154,18 @@ async def chat_endpoint(req: ChatRequest, authorization: str = Header(None)):
 
     # ⭐ 读取本轮自愈轨迹：trace 每轮清零，aget_state 取到的就是这一轮。
     # 包在 try 里：轨迹读取失败绝不影响主响应（面板是锦上添花，回答是命脉）。
-    healing = {}
+    activity = {}
     try:
         snapshot = await router_app.aget_state(config)
         trace = snapshot.values.get("trace", []) if snapshot else []
-        healing = summarize_self_healing_trace(trace)
+        activity = summarize_execution_trace(trace)
     except Exception as e:
-        print(f"⚠️ [/api/chat] 读取自愈轨迹失败（不影响主响应）: {e}", file=sys.stderr)
+        print(f"⚠️ [/api/chat] 读取执行轨迹失败（不影响主响应）: {e}", file=sys.stderr)
 
     return ChatResponse(
         thread_id=thread_id,
         response=final_text,
-        healing=healing,
+        activity=activity,
     )
 
 
