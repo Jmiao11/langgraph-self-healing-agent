@@ -190,7 +190,7 @@ async def analyze_error(state: AgentState, llm, max_attempts: int = MAX_REPAIR_A
             "trace": [{"node": "error_analyzer", "decision": "circuit_breaker_triggered"}]
         }
 
-    # === 找到最近一条带 [TOOL_ERROR] 的 ToolMessage ===
+    # === 找到最近一条出错的 ToolMessage（artifact 优先判据） ===
     last_tool_msg = None
     for m in reversed(state["messages"]):
         if _tool_message_is_error(m):   # ⭐ 与嗅探器同判据（artifact 优先）
@@ -357,7 +357,7 @@ async def build_booking_app(llm):
                     "error_code": e.error_code,
                     "message": e.message,
                 }
-                content = f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                content = e.message  # ⭐ 纯友好文本；category/error_code 仅走 artifact（LLM 不接触技术元数据）
                 return content, artifact
 
         @tool(response_format="content_and_artifact")
@@ -405,7 +405,7 @@ async def build_booking_app(llm):
                     "error_code": e.error_code,
                     "message": e.message,
                 }
-                content = f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                content = e.message  # ⭐ 纯友好文本；category/error_code 仅走 artifact（LLM 不接触技术元数据）
                 return content, artifact
 
         @tool(response_format="content_and_artifact")
@@ -436,9 +436,7 @@ async def build_booking_app(llm):
                     "error_code": e.error_code,
                     "message": e.message,
                 }
-                # content 仍保留 [TOOL_ERROR] 前缀作为回退兼容（方案 A）：
-                # 即使上游读不到 artifact，旧的字符串解析路径仍能兜底
-                content = f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                content = e.message  # ⭐ 纯友好文本；category/error_code 仅走 artifact（LLM 不接触技术元数据）
                 return content, artifact
 
         @tool(response_format="content_and_artifact")
@@ -469,7 +467,7 @@ async def build_booking_app(llm):
                     "error_code": e.error_code,
                     "message": e.message,
                 }
-                content = f"[TOOL_ERROR] category={category_val}, error_code={e.error_code}, message={e.message}"
+                content = e.message  # ⭐ 纯友好文本；category/error_code 仅走 artifact（LLM 不接触技术元数据）
                 return content, artifact
 
         return [
@@ -541,8 +539,8 @@ async def build_booking_app(llm):
         """
         嗅探器：判断本子图工具是否出错，决定是否转自愈。
 
-        ⭐ artifact 优先：优先读 ToolMessage.artifact["is_error"]（强类型），
-           读不到再回退到 content 里的 [TOOL_ERROR] 字符串（方案 A 兼容）。
+        ⭐ 与自愈定位共用 _tool_message_is_error（artifact.is_error 优先，
+           content 字符串回退）——单一判据，不会与定位不一致。
         """
         last_msg = state["messages"][-1]
 
@@ -587,8 +585,7 @@ async def build_booking_app(llm):
         tool_messages = result.get("messages", [])
         trace_entries = []
         for tm in tool_messages:
-            content_str = str(tm.content)
-            is_error = "[TOOL_ERROR]" in content_str
+            is_error = _tool_message_is_error(tm)  # ⭐ artifact 优先，与嗅探器/定位同判据
             trace_entries.append({
                 "node": "tools",
                 "tool_name": getattr(tm, "name", "unknown"),
