@@ -2,11 +2,8 @@
 # 强制浅色模式——档案馆基调，关掉机房深色
 base = "light"
 
-# 主背景：纸张质感的暖奶油色
-backgroundColor = "#FDFBF7"
-
-# 侧边栏 / 次级容器背景：稍深的米色，拉开层级
-secondaryBackgroundColor = "#F4F0E6"
+backgroundColor = "#F0EADC"        # 主背景：偏黄褐，老档案纸
+secondaryBackgroundColor = "#E4DCC8"  # 侧边栏
 
 # 全局文字：老墨水的深炭灰（比纯黑柔和，护眼且有年代感）
 textColor = "#2B2622"
