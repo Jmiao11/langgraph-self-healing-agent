@@ -30,7 +30,7 @@
 **工具集成能力**
 
 1. **MCP 协议接入与 Service 层异常映射**:LLM 工具失败的标准化路径。
-1. - **完整 CRUD + 越权防护**：booking 子图实现订单的 Create / Read / Update / Delete 全流程，配套 cancel_booking 的跨表原子事务（同时更新 bookings 和 seats）+ "存在 → 归属 → 状态" 三段式校验顺序，确保越权请求不暴露资源存在性。
+1. **完整 CRUD + 越权防护**：booking 子图实现订单的 Create / Read / Update / Delete 全流程，配套 cancel_booking 的跨表原子事务（同时更新 bookings 和 seats）+ "存在 → 归属 → 状态" 三段式校验顺序，确保越权请求不暴露资源存在性。
 
 ### 1.4 已知限制与未来工作 (Out of Scope)
 
