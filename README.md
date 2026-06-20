@@ -11,6 +11,7 @@
 - **防越权（IDOR）原子级 CRUD**：业务底层严格执行"存在 → 归属 → 状态"三段式校验，跨表操作保障数据强一致性，配合静默响应杜绝资产信息泄露。
 - **多子图编排 + 消息视图隔离**：四类子图（QA/Booking/Navigation/Guardrail）按意图路由，子图 LLM 只读取自身工具调用历史，跨子图上下文 0 污染（实测 prompt_tokens 降低 66%）。
 - **多会话管理与状态恢复**：后端 checkpointer 持久化图状态 + 独立会话注册表（user→thread 元数据），thread_id 为 join key；会话历史恢复复用“存在→归属” IDOR 闸门，非归属者静默拒绝。
+- **执行轨迹可观测性**：把后端的工具调用与异常自愈提炼为 first-class 展示数据，UI 实时可见——调了哪个工具、成败、V4 0-LLM 短路命中、熔断触发一目了然；trace 每轮清零、`aget_state` 一次读回即本轮完整链路，摘要器为可单测纯函数，读取全程 try/except 包裹绝不拖累主响应。
 
 ------
 
@@ -18,7 +19,7 @@
 
 > 详见 `docs/architecture.excalidraw` 或下方架构图。
 
-<img src="./docs/architecture.excalidraw.png" alt="系统架构图" style="zoom: 50%;" />
+<img src="./assets/architecture.excalidraw-1781939572457-6.png" alt="系统架构图" style="zoom: 33%;" />
 
 **四层架构**：
 
@@ -42,7 +43,7 @@
 | V3   | Prompt 边界锚定（四层防御）       | 解决 LLM 语义边界混淆（SEAT_OCCUPIED 被误分类） |
 | V4   | 异常元数据短路路由                | 已知异常 0 LLM 调用，移除错误的设计前提         |
 
-> 完整演进细节见 [`docs/DESIGN.md` §3.2](docs/DESIGN.md)
+> 完整演进细节见 [`docs/DESIGN.md` §3.2](https://claude.ai/chat/docs/DESIGN.md)
 
 ### 多层身份隔离
 
@@ -66,7 +67,15 @@ BM25 字面量召回 + 向量语义召回，RRF 算法融合排序，支持 LLM 
 
 checkpointer 与会话注册表职责分离：前者存引擎状态（按 thread_id），后者存业务元数据（按 user_id）。`/api/history` 先过 `verify_owner` 归属闸门再 `aget_state` 取状态，非归属 / 不存在一律 404 静默拒绝（与取消订单的 IDOR 防护同源）。
 
-> 完整设计见 [`docs/DESIGN.md` §4](docs/DESIGN.md)
+> 完整设计见 [`docs/DESIGN.md` §4](https://claude.ai/chat/docs/DESIGN.md)
+
+### 执行轨迹可观测性：黑箱变可见
+
+Agent 的工具调用与自愈全在后端，UI 看不见。关键认知是 `AgentState.trace` 早已由子图节点写入、`merge_trace` 哨兵 reducer 每轮清零——`aget_state` 一次读回即本轮完整链路，无需重构。
+
+纯函数 `summarize_execution_trace` 把它翻译成 🛠 工具成败 / ⚡ 0-LLM 短路 / 🧠 LLM 降级 / 🔥 熔断 四类步骤（L1 +14）；`/api/chat` 读取塞入 `ChatResponse.activity`，全程 try/except——可观测性绝不拖累主响应。让"自愈"从口头卖点变成肉眼可证。
+
+> 完整设计见 [`docs/DESIGN.md` §5](https://claude.ai/chat/docs/DESIGN.md)
 
 ------
 
@@ -116,7 +125,7 @@ streamlit run app.py
 | -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | **数据库并发**       | SQLite + WAL，单机轻并发                                     | 生产场景需替换 PostgreSQL + 行锁                             |
 | **多 Provider 兜底** | LLM 池仅接入 Moonshot                                        | 工厂函数已预留扩展点，未实测 GPT/Claude 切换                 |
-| **测试覆盖**         | 核心逻辑已覆盖（L1 纯函数 + L2 mock，65 用例：自愈分类/熔断/降级 + 会话归属隔离 + 历史 IDOR 闸门），路由/子图集成层仍黑盒 | error_analyzer 已用 mock 调用计数验证 V4 短路 0 LLM 调用；集成层（含 MCP）待补 |
+| **测试覆盖**         | 核心逻辑已覆盖（L1 纯函数 + L2 mock，86 用例：自愈分类/熔断/降级 + 会话归属隔离 + 历史 IDOR 闸门 + 执行轨迹摘要），路由/子图集成层仍黑盒 | error_analyzer 已用 mock 调用计数验证 V4 短路 0 LLM 调用；集成层（含 MCP）待补 |
 | **模型名配置**       | 硬编码在 `dependencies.py`                                   | 生产化应抽到 `.env`（已记技术债）                            |
 
 > 详见 [`docs/DESIGN.md §1.4`](https://claude.ai/chat/docs/DESIGN.md)。
