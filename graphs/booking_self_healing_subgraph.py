@@ -152,6 +152,36 @@ def _tool_message_is_error(m) -> bool:
     return "[TOOL_ERROR]" in str(m.content)
 
 
+def build_error_artifact(
+    e: Exception, fallback_code: str, fallback_message: str
+) -> tuple[str, dict]:
+    """把工具执行异常翻译成 (content, artifact)——供工具层 except 统一调用。
+
+    分两类：
+      - BookingDomainError：带自身 category / error_code / message 的结构化 artifact
+        （与 book_seat / cancel 等工具一致；档二让 search 服务层走 _raise_from_result 后，
+         此分支即可接住结构化领域错误）。
+      - 其他裸异常（MCP 崩溃 / stdio 超时等基础设施故障）：兜底为 transient_failure，
+        使其进入自愈链路被分类、被熔断器（重试 2 次封顶）保护，而非裸冒泡 500。
+
+    content 一律为纯友好文本（人读），技术元数据只走 artifact（机读）——与 A1 的人机
+    信道分离一致：用户 / LLM 永远看不到原始异常细节。
+    """
+    if isinstance(e, BookingDomainError):
+        category_val = e.category.value if hasattr(e, "category") else "unknown"
+        return e.message, {
+            "is_error": True,
+            "category": category_val,
+            "error_code": e.error_code,
+            "message": e.message,
+        }
+    return fallback_message, {
+        "is_error": True,
+        "category": "transient_failure",
+        "error_code": fallback_code,
+        "message": fallback_message,
+    }
+
 # ==========================================
 # ⭐ 自愈决策核心逻辑（从闭包中抽出，便于单元测试）
 # ==========================================
@@ -367,14 +397,26 @@ async def build_booking_app(llm):
             - zone_type: 区域类型，可选值为 '静音区'、'讨论区'、'算力区'。
                  如果用户没有指定区域，不要传递此参数。
                  如果用户没有指定特定区域，请不要传递此参数。"""
-            result = await booking_service.search(zone_type)
-            return result, {"is_error": False}
+            try:
+                result = await booking_service.search(zone_type)
+                return result, {"is_error": False}
+            except Exception as e:
+                # search 服务层不走 _raise_from_result，MCP 崩/超时是裸异常；
+                # 交给 build_error_artifact 兜底为 transient_failure，进自愈链路。
+                return build_error_artifact(
+                    e, "SEARCH_UNAVAILABLE", "座位查询服务暂时不可用，请稍后再试。"
+                )
 
         @tool(response_format="content_and_artifact")
         async def get_my_info_tool() -> tuple[str, dict]:
             """查询当前登录用户的积分和违约信息。系统已自动绑定您的身份。"""
-            result = await booking_service.get_user_info(authenticated_sid)
-            return result, {"is_error": False}
+            try:
+                result = await booking_service.get_user_info(authenticated_sid)
+                return result, {"is_error": False}
+            except Exception as e:
+                return build_error_artifact(
+                    e, "USERINFO_UNAVAILABLE", "用户信息查询服务暂时不可用，请稍后再试。"
+                )
 
         # ==========================================
         # ⭐ CRUD 扩展工具（R / U / D）
