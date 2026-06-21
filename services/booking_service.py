@@ -29,6 +29,7 @@ class BookingService:
         "BOOKING_NOT_FOUND": BookingNotFoundError,
         "NOT_YOUR_BOOKING": NotYourBookingError,
         "BOOKING_ALREADY_CANCELLED": BookingAlreadyCancelledError,
+        "DB_ERROR": SystemBusyError,  # ⭐ MCP 各工具 DB 异常兜底码；补映射，避免 DB 故障被误判为 unrecoverable
     }
 
     def __init__(self, mcp_tools):
@@ -82,23 +83,35 @@ class BookingService:
         # 未知错误码兜底为不可恢复
         raise BookingDomainError(error_code or "UNKNOWN", msg)
 
-
     async def search(self, zone_type: str = "") -> str:
-        """查询空座的纯净方法"""
+        """查询空座。成功返回原始结果文本；失败抛对应 BookingDomainError（与 get_my_bookings 一致）。"""
         # ⭐ 防御性编程：洗掉大模型传过来的 None
         args = {}
-        # 只有当 zone_type 真的有文本内容时，我们才把这个键传给底层 MCP
         if zone_type is not None and str(zone_type).strip() != "":
             args["zone_type"] = str(zone_type).strip()
 
-        # 如果 args 是空的 {}，FastMCP 那边会自动使用它自己的默认值，不会报错
         raw_result = await self.search_mcp.ainvoke(args)
-        return self._clean_mcp_output(raw_result)
+        json_str = self._clean_mcp_output(raw_result)
+        # ⭐ 档二：查询失败也走结构化错误映射，进自愈链路
+        #    （此前 success=false 被 _clean_mcp_output 当正常文本喂给 LLM，is_error 永远 False）
+        try:
+            result = json.loads(json_str)
+        except json.JSONDecodeError:
+            raise SystemBusyError(f"底层返回非预期格式: {json_str}")
+        self._raise_from_result(result)  # success=false → 抛领域异常；success=true → 放行
+        return json_str  # 成功：原样返回（零回归，行为与改造前一致）
 
     async def get_user_info(self, student_id: str) -> str:
-        """查询用户的积分和违约信息（纯净接口）"""
+        """查询积分/违约。成功返回原始结果文本；失败抛对应 BookingDomainError。"""
         raw_result = await self.user_info_mcp.ainvoke({"student_id": student_id})
-        return self._clean_mcp_output(raw_result)
+        json_str = self._clean_mcp_output(raw_result)
+        try:
+            result = json.loads(json_str)
+        except json.JSONDecodeError:
+            raise SystemBusyError(f"底层返回非预期格式: {json_str}")
+        self._raise_from_result(result)
+        return json_str
+
 
     # ==========================================
     # ⭐ CRUD 扩展方法：查询/取消/修改订单
