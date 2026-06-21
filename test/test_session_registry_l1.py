@@ -104,6 +104,29 @@ class TestTouchAndOrdering:
     def test_touch_unknown_returns_false(self, registry):
         assert registry.touch("stu_A", "ghost-thread") is False
 
+    def test_delete_own_session_succeeds(self, registry):
+        registry.create_session("stu_A", "tid-A1")
+        assert registry.delete_session("stu_A", "tid-A1") is True
+        # 删后列表为空、get 取不到
+        assert registry.list_sessions("stu_A") == []
+        assert registry.get_session("stu_A", "tid-A1") is None
+
+    def test_delete_non_owner_is_silent_noop(self, registry):
+        """非归属删除：rowcount=0 返回 False，且 A 的会话纹丝不动（静默拒绝）。"""
+        registry.create_session("stu_A", "tid-A1")
+        assert registry.delete_session("stu_B", "tid-A1") is False
+        # A 的会话没被 B 删掉
+        assert registry.verify_owner("stu_A", "tid-A1") is True
+
+    def test_delete_unknown_thread_returns_false(self, registry):
+        assert registry.delete_session("stu_A", "no-such-thread") is False
+
+    def test_delete_is_not_idempotent_second_time_false(self, registry):
+        """删一次成功、再删同一个返回 False——对应端点层的 404 静默拒绝语义。"""
+        registry.create_session("stu_A", "tid-A1")
+        assert registry.delete_session("stu_A", "tid-A1") is True
+        assert registry.delete_session("stu_A", "tid-A1") is False
+
     def test_list_ordered_by_updated_desc(self, registry):
         """列举按 updated_at 倒序：最近活跃的会话排最前。"""
         registry.create_session("stu_A", "old", now="2024-01-01T00:00:00+00:00")

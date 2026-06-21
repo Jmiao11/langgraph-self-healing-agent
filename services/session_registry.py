@@ -150,6 +150,27 @@ class SessionRegistry:
             )
             return cur.rowcount > 0
 
+    def delete_session(self, user_id: str, thread_id: str) -> bool:
+        """删除单条会话。⭐ 归属校验内建在 WHERE：DELETE ... WHERE thread_id=? AND user_id=?。
+
+        非归属者的删除是 rowcount=0 的静默 no-op——与「会话不存在」无法区分，
+        杜绝借 thread_id 探测他人会话。与 touch 的归属内建、与 DB 层越权防护同源。
+
+        注意：本方法只负责 registry 这一层（业务元数据）。checkpointer 里按 thread_id
+        存的图状态由调用方（/api/sessions DELETE 端点）best-effort 清理，两层职责分离。
+
+        Returns:
+            True  确实删了一行（归属成立且会话存在）；
+            False 没有匹配行（不存在 或 不属于该用户）——调用方据此 404 静默拒绝。
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM chat_sessions WHERE thread_id = ? AND user_id = ?",
+                (thread_id, user_id),
+            )
+            return cur.rowcount > 0
+
+
     # ==========================================
     # 读（全部以 user_id 为归属边界）
     # ==========================================
