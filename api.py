@@ -23,11 +23,12 @@ from fastapi import Header, Depends
 
 router_app = None
 session_registry: SessionRegistry = None  # ⭐ 会话注册表（lifespan 中实例化）
+checkpointer = None  # ⭐ 图状态持久化器（lifespan 中实例化；DELETE 会话时清 thread 状态）
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global router_app, session_registry
+    global router_app, session_registry, checkpointer
     print("🚀 [API Server] 正在启动底层 LangGraph 引擎...")
 
     # 初始化基础设施
@@ -318,6 +319,50 @@ async def get_history_endpoint(
         raise HTTPException(status_code=404, detail="会话不存在")
 
     return {"success": True, "thread_id": thread_id, "data": view}
+
+@app.delete("/api/sessions/{thread_id}")
+async def delete_session_endpoint(
+    thread_id: str,
+    student_id: str = Depends(get_authenticated_sid),
+):
+    """删除当前用户的一条会话——闭合会话管理的「增 / 查 / 删」CRUD。
+
+    ⭐ 安全：归属校验内建在 delete_session 的 WHERE 里——非归属 / 不存在一律 404，
+       两者无法区分，与 /api/history 同源的静默拒绝（杜绝借 thread_id 探测）。
+
+    ⭐ 双层持久化的删除顺序（权威 → best-effort，顺序不可反）：
+       1) 先删 registry（真相源）：删掉后这条会话对用户/攻击者立刻彻底不可达
+          （list / history 都过 registry 归属闸门）。
+       2) 再 best-effort 清 checkpointer 的 thread 图状态（清孤儿数据）：包 try/except，
+          失败只 log、不影响已成功的删除——辅助清理不得拖垮主操作，与执行轨迹
+          try/except 的降级隔离同源。
+       反序的风险：若先清图状态、registry 却删失败，会出现“历史已不可读但列表还在”
+       的不一致；先删权威层则“列表消失”与“历史不可读”始终同步。
+    """
+    # 1) 权威删除：registry 行（内建归属，rowcount=0 → 没删到）
+    try:
+        deleted = session_registry.delete_session(student_id, thread_id)
+    except Exception as e:
+        print(f"❌ [/api/sessions DELETE] registry 删除异常: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="会话删除失败")
+
+    if not deleted:
+        # 静默拒绝：不区分“不属于你”与“不存在”
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 2) best-effort 清理 checkpointer 的图状态（失败不影响已成功的删除）
+    try:
+        if checkpointer is not None:
+            await checkpointer.adelete_thread(thread_id)
+    except Exception as e:
+        # 孤儿图状态残留不影响可达性（registry 已删、归属闸门已封死访问），仅 log
+        print(
+            f"⚠️ [/api/sessions DELETE] checkpointer 清理失败"
+            f"（registry 已删，不影响会话不可达）: {e}",
+            file=sys.stderr,
+        )
+
+    return {"success": True, "thread_id": thread_id}
 
 
 def verify_user_from_db(student_id: str, password: str):

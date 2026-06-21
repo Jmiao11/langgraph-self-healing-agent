@@ -143,6 +143,17 @@ def fetch_history(thread_id):
         pass
     return []
 
+def delete_session_api(thread_id):
+    """删除一条会话。成功返回 True；404（非归属/不存在）或网络失败返回 False。"""
+    try:
+        res = requests.delete(
+            f"{API_BASE}/api/sessions/{thread_id}",
+            headers=_auth_headers(),
+            timeout=5,
+        )
+        return res.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
 
 # ==========================================
 # 渲染组件
@@ -372,20 +383,33 @@ def render_session_list():
     for s in sessions:
         tid = s["thread_id"]
         title = (s.get("title") or "").strip() or "未命名会话"
-        label = title if len(title) <= 18 else title[:18] + "…"
+        label = title if len(title) <= 16 else title[:16] + "…"
         is_active = (tid == st.session_state.thread_id)
-        # 当前会话：▶ 前缀 + 禁用（视觉标记、防重复点击）
-        if st.button(
-            ("▶ " if is_active else "") + label,
-            key=f"sess_{tid}",
-            use_container_width=True,
-            disabled=is_active,
-        ):
-            # 切换会话：设 thread_id + 拉历史回填气泡
-            st.session_state.thread_id = tid
-            st.session_state.messages = fetch_history(tid)
-            st.rerun()
 
+        col_switch, col_del = st.columns([5, 1])
+        with col_switch:
+            # 当前会话：▶ 前缀 + 禁用（视觉标记、防重复点击）
+            if st.button(
+                    ("▶ " if is_active else "") + label,
+                    key=f"sess_{tid}",
+                    use_container_width=True,
+                    disabled=is_active,
+            ):
+                # 切换会话：设 thread_id + 拉历史回填气泡
+                st.session_state.thread_id = tid
+                st.session_state.messages = fetch_history(tid)
+                st.rerun()
+        with col_del:
+            if st.button("🗑", key=f"del_{tid}", use_container_width=True, help="删除此会话"):
+                if delete_session_api(tid):
+                    # ⭐ 删的若是当前正在看的会话 → 回到「新会话」态，避免 thread_id 悬空
+                    if tid == st.session_state.thread_id:
+                        st.session_state.thread_id = None
+                        st.session_state.messages = []
+                    st.toast("会话已删除")
+                else:
+                    st.toast("删除失败")
+                st.rerun()
 
 def render_activity_panel(activity):
     """在助手气泡下渲染「执行轨迹」可展开面板。仅当本轮有工具调用/自愈时显示。
