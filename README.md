@@ -19,7 +19,7 @@
 
 > 详见 `docs/architecture.excalidraw` 或下方架构图。
 
-<img src="./assets/architecture.excalidraw-1781939572457-6.png" alt="系统架构图" style="zoom: 33%;" />
+<img src="./assets/architecture.excalidraw-1781939572457-6.png" alt="系统架构整体架构" width="600" />
 
 **四层架构**：
 
