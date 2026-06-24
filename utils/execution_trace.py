@@ -74,14 +74,14 @@ def summarize_execution_trace(trace: list[dict] | None) -> dict:
                 tool_name = entry.get("tool_name", "未知工具")
                 if status == "success":
                     steps.append({
-                        "icon": "🛠",
-                        "title": f"调用工具：{tool_name} · ✅ 成功",
+                        "icon": "▸",
+                        "title": f"调用工具：{tool_name} · ✓ 成功",
                         "detail": "",
                     })
                 else:
                     steps.append({
-                        "icon": "🛠",
-                        "title": f"调用工具：{tool_name} · ❌ 失败",
+                        "icon": "▸",
+                        "title": f"调用工具：{tool_name} · ✕ 失败",
                         "detail": "",
                     })
             # 无 status 的 tools 记录（如 no_auth_abort）不计入展示
@@ -95,7 +95,7 @@ def summarize_execution_trace(trace: list[dict] | None) -> dict:
                 healing_triggered = True
                 shortcut_count += 1
                 steps.append({
-                    "icon": "⚡",
+                    "icon": "◆",
                     "title": f"错误分类：{_category_cn(entry.get('category'))}"
                              f"（命中策略表，0 次 LLM 调用）",
                     "detail": entry.get("user_summary", "") or "",
@@ -106,7 +106,7 @@ def summarize_execution_trace(trace: list[dict] | None) -> dict:
                 healing_triggered = True
                 llm_classify_calls += 1
                 steps.append({
-                    "icon": "🧠",
+                    "icon": "◇",
                     "title": f"错误分类：{_category_cn(entry.get('category'))}"
                              f"（未知异常，LLM 降级分类）",
                     "detail": entry.get("reasoning", "") or entry.get("user_summary", "") or "",
@@ -117,7 +117,7 @@ def summarize_execution_trace(trace: list[dict] | None) -> dict:
                 healing_triggered = True
                 circuit_broken = True
                 steps.append({
-                    "icon": "🔥",
+                    "icon": "⊘",
                     "title": "熔断触发：重试已达上限，停止自愈",
                     "detail": "防止级联故障，转为向用户坦白并建议稍后重试。",
                 })

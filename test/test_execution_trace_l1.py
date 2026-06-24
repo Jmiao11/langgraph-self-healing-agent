@@ -49,9 +49,9 @@ class TestToolVisibility:
         assert s["has_activity"] is True
         assert s["tool_call_count"] == 1
         assert s["healing_triggered"] is False
-        assert s["steps"][0]["icon"] == "🛠"
+        assert s["steps"][0]["icon"] == "▸"
         assert "book_seat_tool" in s["steps"][0]["title"]
-        assert "✅" in s["steps"][0]["title"]
+        assert "✓" in s["steps"][0]["title"]
 
     def test_no_auth_abort_not_counted(self):
         """无 status 的 tools 记录（no_auth_abort）不计入工具调用。"""
@@ -69,16 +69,16 @@ class TestToolVisibility:
 class TestHealingWithTools:
 
     def test_error_then_shortcut(self):
-        """⭐ 工具失败 → 短路自愈：工具步可见(❌) + 短路分类，0 LLM。"""
+        """⭐ 工具失败 → 短路自愈：工具步可见(✕) + 短路分类，0 LLM。"""
         s = summarize_execution_trace([AGENT_CALL, TOOLS_ERR, SHORTCUT])
         assert s["has_activity"] is True
         assert s["tool_call_count"] == 1
         assert s["healing_triggered"] is True
         assert s["shortcut_count"] == 1
         assert s["llm_classify_calls"] == 0
-        # 步骤：🛠 失败 → ⚡ 短路分类
-        assert [step["icon"] for step in s["steps"]] == ["🛠", "⚡"]
-        assert "❌" in s["steps"][0]["title"]
+        # 步骤：▸ 失败 → ◆ 短路分类
+        assert [step["icon"] for step in s["steps"]] == ["▸", "◆"]
+        assert "✕" in s["steps"][0]["title"]
         assert "资源冲突" in s["steps"][1]["title"]
         assert "0 次 LLM 调用" in s["steps"][1]["title"]
 
@@ -88,15 +88,15 @@ class TestHealingWithTools:
             AGENT_CALL, TOOLS_ERR, SHORTCUT, AGENT_CALL, TOOLS_OK2, AGENT_RESPOND
         ])
         assert s["tool_call_count"] == 2
-        assert [step["icon"] for step in s["steps"]] == ["🛠", "⚡", "🛠"]
+        assert [step["icon"] for step in s["steps"]] == ["▸", "◆", "▸"]
         assert "search_free_seats_tool" in s["steps"][2]["title"]
-        assert "✅" in s["steps"][2]["title"]
+        assert "✓" in s["steps"][2]["title"]
 
     def test_llm_fallback(self):
         s = summarize_execution_trace([TOOLS_ERR, LLM_CLASSIFY])
         assert s["llm_classify_calls"] == 1
         assert s["shortcut_count"] == 0
-        assert s["steps"][1]["icon"] == "🧠"
+        assert s["steps"][1]["icon"] == "◇"
         assert "参数不合法" in s["steps"][1]["title"]
         assert s["steps"][1]["detail"] == "时长越界"
 
@@ -104,7 +104,7 @@ class TestHealingWithTools:
         s = summarize_execution_trace([TOOLS_ERR, SHORTCUT, TOOLS_ERR, CIRCUIT])
         assert s["circuit_broken"] is True
         assert s["tool_call_count"] == 2
-        assert s["steps"][-1]["icon"] == "🔥"
+        assert s["steps"][-1]["icon"] == "⊘"
 
 
 class TestRobustness:
@@ -137,4 +137,4 @@ class TestRobustness:
 
     def test_order_preserved(self):
         s = summarize_execution_trace([TOOLS_ERR, SHORTCUT, TOOLS_OK2])
-        assert [step["icon"] for step in s["steps"]] == ["🛠", "⚡", "🛠"]
+        assert [step["icon"] for step in s["steps"]] == ["▸", "◆", "▸"]
