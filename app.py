@@ -6,7 +6,7 @@ import uuid
 API_BASE = "http://127.0.0.1:8000"
 
 # 页面基础设置
-st.set_page_config(page_title="梦想自习室 AI 馆员", page_icon="📚", layout="wide")
+st.set_page_config(page_title="梦想自习室 AI 馆员", page_icon="❖", layout="wide")
 
 def inject_custom_css():
     st.markdown("""
@@ -185,7 +185,7 @@ def render_my_bookings_sidebar():
 
 def render_my_bookings_page():
     """我的订单独立视图：汇总统计 + 订单卡片列表。"""
-    st.title("📋 我的订单")
+    st.title("❖ 我的订单")
 
     bookings = fetch_my_bookings()
     if bookings is None:
@@ -336,7 +336,7 @@ def render_seat_grid():
 
 def render_seat_panel_page():
     """座位面板独立页：顶部汇总统计 + 座位网格。"""
-    st.title("🪑 座位面板")
+    st.title("❖ 座位面板")
 
     seats = fetch_seats()
     if seats is None:
@@ -411,6 +411,15 @@ def render_session_list():
                     st.toast("删除失败")
                 st.rerun()
 
+# 执行轨迹图标 → 主题色（结构符号走墨/灰褐，成败/熔断三态上色）
+_TRACE_ICON_COLOR = {
+    "▸": "#8A7B5E",   # 工具调用：灰褐，作步骤骨架
+    "◆": "#5C7A52",   # 0-LLM 短路：墨绿（高效命中）
+    "◇": "#6B5D45",   # LLM 降级：棕墨（中性）
+    "⊘": "#7F1D1D",   # 熔断：复古红（危险态）
+}
+
+
 def render_activity_panel(activity):
     """在助手气泡下渲染「执行轨迹」可展开面板。仅当本轮有工具调用/自愈时显示。
     activity 为 /api/chat 返回的 summarize_execution_trace 结果。"""
@@ -424,18 +433,30 @@ def render_activity_panel(activity):
     steps = activity.get("steps", [])
 
     # headline：基础显工具调用次数；发生自愈时突出最亮的指标（0 LLM 短路）
-    headline = f"🛠 执行轨迹 · {tool_calls} 次工具调用"
+    headline = f"▸ 执行轨迹 · {tool_calls} 次工具调用"
     if healing:
         if shortcut and not llm_calls:
-            headline += f" · ⚡ {shortcut} 次确定性短路（0 LLM）"
+            headline += f" · ◆ {shortcut} 次确定性短路（0 LLM）"
         elif llm_calls:
-            headline += f" · 🧠 {llm_calls} 次 LLM 降级分类"
+            headline += f" · ◇ {llm_calls} 次 LLM 降级分类"
     if circuit:
-        headline += " · 🔥 已熔断"
+        headline += " · ⊘ 已熔断"
 
     with st.expander(headline, expanded=True):
         for step in steps:
-            st.markdown(f"{step.get('icon','')} **{step.get('title','')}**")
+            icon = step.get("icon", "")
+            title = step.get("title", "")
+            color = _TRACE_ICON_COLOR.get(icon, "#2B2622")
+            # 成败标记上色：成功墨绿 / 失败复古红
+            title_html = (
+                title.replace("✓", '<span style="color:#5C7A52">✓</span>')
+                     .replace("✕", '<span style="color:#7F1D1D">✕</span>')
+            )
+            st.markdown(
+                f'<span style="color:{color};font-weight:700">{icon}</span> '
+                f'<span style="font-weight:600">{title_html}</span>',
+                unsafe_allow_html=True,
+            )
             detail = step.get("detail")
             if detail:
                 st.caption(detail)
@@ -445,7 +466,7 @@ def render_activity_panel(activity):
 # 1. 登录逻辑（不动）
 # ==========================================
 if not st.session_state.logged_in:
-    st.title("🔐 梦想自习室 - 身份认证")
+    st.title("❖ 梦想自习室 · 身份认证")
     st.info("提示：测试账号 stu001 / 密码 123")
 
     with st.form("login"):
@@ -508,7 +529,7 @@ else:
 
     else:
         # AI 馆员聊天（原样不动）
-        st.title("📚 AI 馆员在线中")
+        st.title("❖ AI 馆员在线中")
 
         # 渲染历史
         for msg in st.session_state.messages:
