@@ -40,6 +40,18 @@ dotenv.load_dotenv()
 
 MAX_REPAIR_ATTEMPTS = 2  # 同一次对话允许的最大自愈次数
 
+# ⭐ 订单操作（取消/修改）流程约束：防止 LLM 在缺少真实 booking_id 时套用工具说明里的示例值
+BOOKING_FLOW_GUIDE = """
+【订单操作流程约束 - 取消 / 修改】
+⭐ booking_id 只能来自 get_my_bookings_tool 的真实返回，严禁猜测、编造，或套用工具说明里的任何示例值。
+⭐ 当用户以「座位号」或模糊指代（如"帮我取消那个座位"）要求取消 / 修改订单时：
+   1. 必须先调用 get_my_bookings_tool，拿到当前用户的真实订单列表；
+   2. 在列表中按座位号 / 状态找出对应的那条订单，核对座位号确实匹配；
+   3. 再用查到的真实 booking_id 调用 cancel_booking_tool / update_booking_duration_tool。
+⭐ 若用户名下没有与该座位匹配的订单，直接如实告知"您名下没有 X 号座位的订单"，
+   严禁编造订单号、严禁谎称已为其执行过取消 / 修改操作。
+"""
+
 # ==========================================
 # ⭐ 错误分类 -> 处理策略 映射表（确定性决策）
 # ==========================================
@@ -456,7 +468,7 @@ async def build_booking_app(llm):
             取消一个订单。订单取消后座位会自动释放。
 
             参数:
-            - booking_id: 要取消的订单号（例如 BKG_TEST0001）
+            - booking_id: 要取消的订单号，必须取自 get_my_bookings_tool 的真实返回，禁止猜测或套用示例值
 
             注意：只能取消您本人的订单。
             """
@@ -487,7 +499,7 @@ async def build_booking_app(llm):
             修改订单的时长。
 
             参数:
-            - booking_id: 要修改的订单号（例如 BKG_TEST0001）
+            - booking_id: 要修改的订单号，必须取自 get_my_bookings_tool 的真实返回，禁止猜测或套用示例值
             - new_duration: 新的时长（小时，1-8）
 
             注意：只能修改您本人的、未取消的订单。
@@ -545,7 +557,7 @@ async def build_booking_app(llm):
             state["messages"],
             own_tool_names=BOOKING_OWN_TOOLS,
         )
-        messages = [sys_msg] + local_view
+        messages = [sys_msg, SystemMessage(content=BOOKING_FLOW_GUIDE)] + local_view
 
         response = await llm_with_tools.ainvoke(messages)
 
