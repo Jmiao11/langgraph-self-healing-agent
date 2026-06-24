@@ -58,14 +58,23 @@ def init_database():
         cursor.execute(
             "INSERT INTO users (student_id, name, password, violation_count) VALUES ('stu_bad', '违规大王', '123', 5)")
 
-        # 座位数据测试：座位 1 和 2 预先标记为 OCCUPIED（对应下面的测试订单）
-        test_seats = [
-            (1, '静音区', 'OCCUPIED'),  # 被 stu001 的订单占用
-            (2, '静音区', 'OCCUPIED'),  # 被 stu_bad 的订单占用
-            (3, '讨论区', 'FREE'),
-            (210, '算力区', 'FREE')
+        # ⭐ 座位池：三区分布，编号区码化（1xx 讨论 / 2xx 算力，静音从 1 起以保住测试锚点 1/2）
+        # 占用规则：锚点 1/2 强制 OCCUPIED（对应下方测试订单）；其余 seat_id % 3 == 0 视为他人占用，
+        #          余下 FREE。纯规则、不用 random → 每次 init 结果一致，演示/截图可复现。
+        ZONE_RANGES = [
+            ("静音区", range(1, 41)),     # 1–40
+            ("讨论区", range(101, 121)),  # 101–120
+            ("算力区", range(201, 213)),  # 201–212
         ]
+        ANCHOR_OCCUPIED = {1, 2}  # 绑定 BKG_TEST 订单，必须保持 OCCUPIED
+        test_seats = []
+        for zone_name, id_range in ZONE_RANGES:
+            for sid in id_range:
+                occupied = sid in ANCHOR_OCCUPIED or sid % 3 == 0
+                test_seats.append((sid, zone_name, "OCCUPIED" if occupied else "FREE"))
         cursor.executemany("INSERT INTO seats (seat_id, zone_type, status) VALUES (?, ?, ?)", test_seats)
+        _occupied = sum(1 for _s in test_seats if _s[2] == "OCCUPIED")
+        print(f"   - 座位池：{len(test_seats)} 座（静音区 40 / 讨论区 20 / 算力区 12），占用 {_occupied} 座")
 
         # ⭐ CRUD 测试数据：预置几条订单以便测试 Read/Update/Delete
         # - BKG_TEST0001: stu001 的活跃订单（可测试 cancel / update）
