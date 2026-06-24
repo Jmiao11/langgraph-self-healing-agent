@@ -35,7 +35,7 @@ def build_vector_db_with_auto_metadata():
     loader = DirectoryLoader(DOCS_DIR, glob="**/*.txt", loader_cls=TextLoader, loader_kwargs={"encoding": "utf-8"})
     docs = loader.load()
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=250, chunk_overlap=50)
     split_docs = text_splitter.split_documents(docs)
     print(f"✂️ 文档已切分为 {len(split_docs)} 个片段。")
 
@@ -48,8 +48,9 @@ def build_vector_db_with_auto_metadata():
     llm = ChatOpenAI(
         api_key=os.environ.get("MOONSHOT_API_KEY"),
         base_url="https://api.moonshot.cn/v1",
-        model="kimi-k2-turbo-preview",
+        model="moonshot-v1-8k",
         temperature=0,
+        max_tokens=4096,
     )
 
     # 强制 LLM 输出咱们定义的 RuleMetadata 结构！
@@ -84,6 +85,10 @@ def build_vector_db_with_auto_metadata():
 
         except Exception as e:
             print(f"      ❌ 第 {i + 1} 个片段提取失败，跳过: {e}")
+
+    if not rich_docs:
+        print("❌ 所有片段元数据提取失败，知识库构建中止。请检查 LLM API 配置。")
+        return
 
     # ==========================================
     # 3. 存入 ChromaDB (带入灵魂)
