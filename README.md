@@ -10,11 +10,16 @@
 
 ## 项目演示
 
-| 功能                                                         | 界面                                                         |
-| ------------------------------------------------------------ | ------------------------------------------------------------ |
-| **异常自愈 · 执行轨迹可见**<br>「取消座位」连调 `get_my_bookings` + `cancel_booking` 两步，自愈过程在面板逐行可见 | ![healing](https://claude.ai/chat/docs/images/demo-healing.png) *(占位，待补)* |
-| **0-LLM 短路**<br>「订一个被占的座位」→ 命中 `resource_conflict`，0 次 LLM 调用直接查表修复 | ![shortcut](https://claude.ai/chat/docs/images/demo-shortcut.png) *(占位，待补)* |
-| **三视图 + 多会话**<br>AI 馆员 / 座位 / 我的预约三视图，侧栏会话可切换、可删除 | ![sessions](https://claude.ai/chat/docs/images/demo-sessions.png) *(占位，待补)* |
+> 截图基于档案馆衬线主题；执行轨迹面板图标已统一为线条符号（▸ 工具 / ◆ 0-LLM 短路 / ◇ LLM 降级 / ⊘ 熔断），成败与熔断按主题色（墨绿 / 复古红）标注。
+
+| 功能                                                         | 界面                                                     |
+| ------------------------------------------------------------ | -------------------------------------------------------- |
+| **异常自愈 · 执行轨迹可见**<br>「取消座位」连调 `get_my_bookings` + `cancel_booking`，自愈过程在面板逐行可见 | ![healing](docs/images/self_healing_execution_trace.png) |
+| **0-LLM 短路**<br>订一个被占座位 → 命中 `resource_conflict`，0 次 LLM 调用直接查表修复 | ![shortcut](docs/images/zero_llm_shortcut.png)           |
+| **越权防护 · 静默拒绝**<br>试图操作他人订单 → 选 `UNRECOVERABLE` 静默拒绝，不泄露资源是否存在 | ![idor](docs/images/idor_silent_reject.png)              |
+| **熔断保护**（提前把 DB 设只读）<br>连续修复失败 → `repair_attempts ≥ 2` 强制终止，转坦白并建议稍后重试 | ![circuit](docs/images/circuit_breaker.png)              |
+| **实时座位面板（72 座）**<br>三区（静音 / 讨论 / 算力）网格，我的 / 空闲 / 已占三态一目了然 | ![seats](docs/images/seat_panel_72.png) *(待补)          |
+| **三视图 + 多会话 CRUD**<br>AI 馆员 / 座位 / 我的预约三视图，侧栏会话可切换、可删除 | ![sessions](docs/images/multi_session_crud.png)          |
 
 ------
 
@@ -101,7 +106,7 @@ checkpointer 与会话注册表职责分离：前者存引擎状态（按 `threa
 
 ### 执行轨迹可观测性：让自愈从黑箱变可证
 
-Agent 的工具调用与自愈全在后端，UI 看不见。关键认知是 `AgentState.trace` 早已由子图节点写入、`merge_trace` 哨兵 reducer 每轮清零——`aget_state` 一次读回即本轮完整链路，无需重构。纯函数 `summarize_execution_trace` 把它翻译成 🛠 工具成败 / ⚡ 0-LLM 短路 / 🧠 LLM 降级 / 🔥 熔断 四类步骤（L1 +14）；`/api/chat` 读取塞入 `ChatResponse.activity`，全程 try/except——可观测性绝不拖累主响应。让「自愈」从口头卖点变成肉眼可证。
+Agent 的工具调用与自愈全在后端，UI 看不见。关键认知是 `AgentState.trace` 早已由子图节点写入、`merge_trace` 哨兵 reducer 每轮清零——`aget_state` 一次读回即本轮完整链路，无需重构。纯函数 `summarize_execution_trace` 把它翻译成 ▸ 工具成败 / ◆ 0-LLM 短路 / ◇ LLM 降级 / ⊘ 熔断 四类步骤（L1 +14）；`/api/chat` 读取塞入 `ChatResponse.activity`，全程 try/except——可观测性绝不拖累主响应。让「自愈」从口头卖点变成肉眼可证。
 
 > 完整设计见 [`docs/DESIGN.md` §5](./docs/DESIGN.md)
 
