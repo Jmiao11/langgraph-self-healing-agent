@@ -18,7 +18,7 @@
 | **0-LLM 短路**<br>订一个被占座位 → 命中 `resource_conflict`，0 次 LLM 调用直接查表修复 | ![shortcut](docs/images/zero_llm_shortcut.png)           |
 | **越权防护 · 静默拒绝**<br>试图操作他人订单 → 选 `UNRECOVERABLE` 静默拒绝，不泄露资源是否存在 | ![idor](docs/images/idor_silent_reject.png)              |
 | **熔断保护**（提前把 DB 设只读）<br>连续修复失败 → `repair_attempts ≥ 2` 强制终止，转坦白并建议稍后重试 | ![circuit](docs/images/circuit_breaker.png)              |
-| **实时座位面板（72 座）**<br>三区（静音 / 讨论 / 算力）网格，我的 / 空闲 / 已占三态一目了然 | ![seats](docs/images/seat_panel_72.png) *(待补)          |
+| **实时座位面板（72 座）**<br>三区（静音 / 讨论 / 算力）网格，我的 / 空闲 / 已占三态一目了然 | ![seats](docs/images/seat_panel_72.png)                  |
 | **三视图 + 多会话 CRUD**<br>AI 馆员 / 座位 / 我的预约三视图，侧栏会话可切换、可删除 | ![sessions](docs/images/multi_session_crud.png)          |
 
 ------
