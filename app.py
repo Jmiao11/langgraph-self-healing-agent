@@ -282,58 +282,6 @@ def _render_seat_zones(seats, expanded_in_page=False):
     st.markdown("".join(parts), unsafe_allow_html=True)
 
 
-def render_seat_grid():
-    """主区顶部：实时座位网格，CSS Grid 渲染，自己的座位高亮。"""
-    with st.expander("🪑 实时座位状态", expanded=True):
-        seats = fetch_seats()
-
-        if seats is None:
-            st.warning("座位数据加载失败，请检查后端服务")
-            return
-        if not seats:
-            st.info("暂无座位数据")
-            return
-
-        # 按区域分组
-        zones = {}
-        for s in seats:
-            zones.setdefault(s["zone_type"], []).append(s)
-
-        st.caption("🟦 我的座位 ｜ 🟩 空闲 ｜ ⬛ 已占用（他人）")
-
-        # ⭐ 用单段 CSS Grid 一次性渲染：卡片自动等宽等高、紧凑换行，
-        #    不受 st.columns 在 expander 内的 gap/最小宽行为影响
-        parts = ['<div style="display:flex;flex-direction:column;gap:14px;">']
-        for zone_name, zone_seats in zones.items():
-            parts.append(
-                f'<div style="font-weight:600;color:#c9d1d9;font-size:15px;">{zone_name}</div>'
-            )
-            parts.append(
-                '<div style="display:grid;'
-                'grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:10px;">'
-            )
-            for s in zone_seats:
-                if s["is_mine"]:
-                    bg, border, color, tag = "#1f6feb", "#1f6feb", "#ffffff", "我的"
-                elif s["status"] == "FREE":
-                    bg, border, color, tag = "#0d1117", "#2ea043", "#7ee787", "空闲"
-                else:  # OCCUPIED 他人
-                    bg, border, color, tag = "#161b22", "#6e7681", "#8b949e", "已占"
-                parts.append(
-                    f'<div style="background:{bg};border:1px solid {border};'
-                    f'border-radius:8px;padding:10px 6px;text-align:center;color:{color};">'
-                    f'<div style="font-size:18px;font-weight:700;line-height:1.3;">{s["seat_id"]}</div>'
-                    f'<div style="font-size:12px;opacity:0.85;">{tag}</div>'
-                    f'</div>'
-                )
-            parts.append('</div>')
-        parts.append('</div>')
-
-        # ⭐ 必须 "".join 不留换行——Streamlit 的 markdown 会把空行解释成段落分隔，
-        #    破坏 HTML 结构
-        st.markdown("".join(parts), unsafe_allow_html=True)
-
-
 def render_seat_panel_page():
     """座位面板独立页：顶部汇总统计 + 座位网格。"""
     st.title("❖ 座位面板")
